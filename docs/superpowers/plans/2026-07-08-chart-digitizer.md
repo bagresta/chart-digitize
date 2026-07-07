@@ -2807,3 +2807,233 @@ git commit -m "feat: add interactive canvas with draggable points and axis calib
 ```
 
 ---
+
+## Task 23: Data table, add-point control, and Review page
+
+**Files:**
+- Create: `frontend/src/components/DataTable.tsx`
+- Create: `frontend/src/pages/Review.tsx`
+
+- [ ] **Step 1: Implement the read-only data table**
+
+`frontend/src/components/DataTable.tsx`:
+```tsx
+import type { SeriesData } from "../types";
+
+interface DataTableProps {
+  series: SeriesData[];
+}
+
+export function DataTable({ series }: DataTableProps) {
+  return (
+    <table style={{ borderCollapse: "collapse", width: "100%" }}>
+      <thead>
+        <tr>
+          <th style={{ textAlign: "left", borderBottom: "1px solid #ccc" }}>Series</th>
+          <th style={{ textAlign: "left", borderBottom: "1px solid #ccc" }}>X</th>
+          <th style={{ textAlign: "left", borderBottom: "1px solid #ccc" }}>Y</th>
+        </tr>
+      </thead>
+      <tbody>
+        {series.flatMap((s, seriesIndex) =>
+          s.points.map(([x, y], pointIndex) => (
+            <tr key={`${seriesIndex}-${pointIndex}`}>
+              <td>{s.name}</td>
+              <td>{x.toFixed(3)}</td>
+              <td>{y.toFixed(3)}</td>
+            </tr>
+          )),
+        )}
+      </tbody>
+    </table>
+  );
+}
+```
+
+- [ ] **Step 2: Implement the Review page, wiring canvas + table + export**
+
+`frontend/src/pages/Review.tsx`:
+```tsx
+import { useState } from "react";
+import { ChartCanvas } from "../components/ChartCanvas";
+import { DataTable } from "../components/DataTable";
+import { exportCsv, exportExcel } from "../api";
+import type { SeriesData, UploadResult } from "../types";
+
+interface ReviewPageProps {
+  uploadResult: UploadResult;
+  imageDataUrl: string;
+}
+
+export function Review({ uploadResult, imageDataUrl }: ReviewPageProps) {
+  const [series, setSeries] = useState<SeriesData[]>(uploadResult.series);
+  const [xReferencePoints, setXReferencePoints] = useState(uploadResult.xReferencePoints);
+  const [yReferencePoints, setYReferencePoints] = useState(uploadResult.yReferencePoints);
+
+  function handlePointMove(seriesIndex: number, pointIndex: number, x: number, y: number) {
+    setSeries((prev) =>
+      prev.map((s, i) =>
+        i !== seriesIndex
+          ? s
+          : { ...s, points: s.points.map((p, j) => (j === pointIndex ? [x, y] : p)) as [number, number][] },
+      ),
+    );
+  }
+
+  function handleDeletePoint(seriesIndex: number, pointIndex: number) {
+    setSeries((prev) =>
+      prev.map((s, i) =>
+        i !== seriesIndex ? s : { ...s, points: s.points.filter((_, j) => j !== pointIndex) },
+      ),
+    );
+  }
+
+  function handleAddPoint(seriesIndex: number) {
+    const seriesPoints = series[seriesIndex].points;
+    const lastPoint = seriesPoints[seriesPoints.length - 1] ?? [0, 0];
+    setSeries((prev) =>
+      prev.map((s, i) => (i !== seriesIndex ? s : { ...s, points: [...s.points, [lastPoint[0], lastPoint[1]]] })),
+    );
+  }
+
+  function handleRecalibrate(axis: "x" | "y", referenceIndex: number, newPixel: number) {
+    const setter = axis === "x" ? setXReferencePoints : setYReferencePoints;
+    setter((prev) => prev.map((ref, i) => (i === referenceIndex ? [newPixel, ref[1]] : ref)));
+  }
+
+  return (
+    <div style={{ display: "flex", gap: 24, padding: 24 }}>
+      <div>
+        <ChartCanvas
+          imageDataUrl={imageDataUrl}
+          series={series}
+          xReferencePoints={xReferencePoints}
+          yReferencePoints={yReferencePoints}
+          onPointMove={handlePointMove}
+          onDeletePoint={handleDeletePoint}
+          onRecalibrate={handleRecalibrate}
+        />
+        <p style={{ color: "#666", fontSize: 13 }}>
+          Drag a point to correct it. Double-click a point to delete it. Drag a black square to
+          recalibrate that axis reference.
+        </p>
+        {series.map((s, i) => (
+          <button key={s.name} onClick={() => handleAddPoint(i)}>
+            + Add point to {s.name}
+          </button>
+        ))}
+      </div>
+      <div style={{ flex: 1 }}>
+        <DataTable series={series} />
+        <div style={{ marginTop: 16, display: "flex", gap: 8 }}>
+          <button onClick={() => exportCsv(series)}>Download CSV</button>
+          <button onClick={() => exportExcel(series)}>Download Excel</button>
+          <a
+            href={`data:image/png;base64,${uploadResult.overlayImageBase64}`}
+            download="chart_overlay.png"
+          >
+            <button>Download overlay PNG</button>
+          </a>
+        </div>
+      </div>
+    </div>
+  );
+}
+```
+
+- [ ] **Step 3: Verify it compiles**
+
+Run: `cd frontend && npx tsc --noEmit`
+Expected: no type errors.
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add frontend/src/components/DataTable.tsx frontend/src/pages/Review.tsx
+git commit -m "feat: add data table and review page with export"
+```
+
+---
+
+## Task 24: App routing and manual browser verification
+
+**Files:**
+- Modify: `frontend/src/App.tsx`, `frontend/src/main.tsx`
+
+- [ ] **Step 1: Wire up routing and shared upload-result state**
+
+`frontend/src/App.tsx`:
+```tsx
+import { useState } from "react";
+import { Navigate, Route, Routes } from "react-router-dom";
+import { Login } from "./pages/Login";
+import { Upload } from "./pages/Upload";
+import { Review } from "./pages/Review";
+import type { UploadResult } from "./types";
+
+export default function App() {
+  const [uploadResult, setUploadResult] = useState<UploadResult | null>(null);
+  const [imageDataUrl, setImageDataUrl] = useState<string>("");
+
+  function handleUploaded(result: UploadResult, dataUrl: string) {
+    setUploadResult(result);
+    setImageDataUrl(dataUrl);
+  }
+
+  return (
+    <Routes>
+      <Route path="/" element={<Login />} />
+      <Route path="/upload" element={<Upload onUploaded={handleUploaded} />} />
+      <Route
+        path="/review"
+        element={uploadResult ? <Review uploadResult={uploadResult} imageDataUrl={imageDataUrl} /> : <Navigate to="/upload" />}
+      />
+    </Routes>
+  );
+}
+```
+
+`frontend/src/main.tsx`:
+```tsx
+import React from "react";
+import ReactDOM from "react-dom/client";
+import { BrowserRouter } from "react-router-dom";
+import App from "./App";
+
+ReactDOM.createRoot(document.getElementById("root")!).render(
+  <React.StrictMode>
+    <BrowserRouter>
+      <App />
+    </BrowserRouter>
+  </React.StrictMode>,
+);
+```
+
+- [ ] **Step 2: Run the full frontend test suite**
+
+Run: `cd frontend && npx vitest run`
+Expected: all tests PASS.
+
+- [ ] **Step 3: Manual browser verification**
+
+Run: `cd backend && APP_PASSWORD=devpass SESSION_SECRET_KEY=devsecret uvicorn app.main:app --reload --port 8000` (separate terminal)
+Run: `cd frontend && VITE_API_BASE_URL=http://localhost:8000 npm run dev`
+
+In a browser:
+1. Log in with `devpass`.
+2. Upload a real Kaplan-Meier curve image (e.g. a screenshot from a published trial figure) and a simple line/bar chart.
+3. Confirm the review screen shows the image with overlaid points roughly on the curve/bars.
+4. Drag a point and confirm the data table updates live with a plausible new value.
+5. Drag a black calibration square and confirm all points on that axis shift accordingly.
+6. Click "Download CSV" and confirm the file opens with sane values.
+
+Note any systematic misdetection (e.g. always off by one tick, wrong chart type) — that indicates which pipeline module (Tasks 3-13) needs threshold tuning against real (non-synthetic) images, since all backend tests so far only used matplotlib-generated fixtures.
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add frontend/src/App.tsx frontend/src/main.tsx
+git commit -m "feat: wire up app routing between login, upload, and review pages"
+```
+
+---
