@@ -1513,3 +1513,233 @@ git commit -m "feat: draw detected points overlay onto original chart image"
 ```
 
 ---
+
+## Task 13: Pipeline orchestration
+
+Wires every prior module together into one entry point the API layer calls. Handles the case where no legend is found (single unlabeled series) and supports a manual axis-range override for the "OCR failed" fallback path.
+
+**Files:**
+- Create: `backend/app/pipeline/pipeline.py`
+- Test: `backend/tests/test_pipeline.py`
+
+- [ ] **Step 1: Write the failing test**
+
+`backend/tests/test_pipeline.py`:
+```python
+import cv2
+import pytest
+
+from app.pipeline.pipeline import run_pipeline
+from tests.fixtures import make_km_chart, make_line_chart
+
+
+def _encode(image):
+    success, buf = cv2.imencode(".png", image)
+    assert success
+    return buf.tobytes()
+
+
+def test_run_pipeline_on_single_series_line_chart():
+    image, truth = make_line_chart()
+    result = run_pipeline(_encode(image))
+
+    assert result.chart_type == "line"
+    assert len(result.series) == 1
+    assert len(result.series[0].points) > 5
+    mid = [p for p in result.series[0].points if 4 <= p[0] <= 6][len(result.series[0].points) // 4]
+    assert mid[1] == pytest.approx(8 * mid[0] + 5, abs=8)
+    assert result.overlay_image_png  # non-empty bytes
+
+
+def test_run_pipeline_on_km_chart_finds_both_arms():
+    image, truth = make_km_chart()
+    result = run_pipeline(_encode(image))
+
+    assert result.chart_type == "kaplan_meier"
+    assert len(result.series) == 2
+    names = {s.name.strip().lower() for s in result.series}
+    assert any("arm a" in n for n in names)
+    assert any("arm b" in n for n in names)
+
+
+def test_run_pipeline_with_manual_axis_override_skips_ocr_calibration():
+    image, truth = make_line_chart()
+    result = run_pipeline(
+        _encode(image),
+        manual_x_range=(0.0, 10.0),
+        manual_y_range=(0.0, 100.0),
+    )
+
+    assert len(result.series) == 1
+    assert len(result.series[0].points) > 5
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `cd backend && pytest tests/test_pipeline.py -v`
+Expected: FAIL — `ModuleNotFoundError: No module named 'app.pipeline.pipeline'`
+
+- [ ] **Step 3: Implement pipeline orchestration**
+
+`backend/app/pipeline/pipeline.py`:
+```python
+"""Top-level orchestration: image bytes in, structured extraction result out.
+Ties together geometry detection, OCR-based calibration (or a manual
+override), chart-type classification, and per-series point extraction."""
+from dataclasses import dataclass, field
+
+import cv2
+import numpy as np
+
+from app.pipeline.calibration import AxisCalibration, fit_axis_calibration
+from app.pipeline.classify import ChartType, classify_chart_type
+from app.pipeline.curves import (
+    detect_censoring_marks,
+    extract_bar_heights,
+    extract_scatter_points,
+    isolate_series_mask,
+    trace_line_curve,
+)
+from app.pipeline.geometry import PlotBox, detect_plot_box, detect_tick_positions
+from app.pipeline.legend import LegendEntry, detect_legend_entries
+from app.pipeline.ocr import read_axis_tick_labels
+
+
+@dataclass
+class SeriesResult:
+    name: str
+    color_bgr: tuple[int, int, int]
+    points: list[tuple[float, float]]
+    censoring_marks: list[tuple[float, float]] = field(default_factory=list)
+
+
+@dataclass
+class PipelineResult:
+    chart_type: str
+    series: list[SeriesResult]
+    overlay_image_png: bytes
+    x_axis_calibrated_from_ocr: bool
+    y_axis_calibrated_from_ocr: bool
+
+
+def _decode_image(image_bytes: bytes) -> np.ndarray:
+    file_bytes = np.frombuffer(image_bytes, dtype=np.uint8)
+    image = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
+    if image is None:
+        raise ValueError("Could not decode image — unsupported or corrupt file")
+    return image
+
+
+def _build_axis_calibration(
+    image: np.ndarray, box: PlotBox, axis: str, manual_range: tuple[float, float] | None
+) -> tuple[AxisCalibration, bool]:
+    if manual_range is not None:
+        low, high = manual_range
+        pixel_start = box.bottom if axis == "x" else box.bottom
+        pixel_end = box.left if axis == "x" else box.top
+        # two-point calibration directly from user-provided min/max at the
+        # known plot-box edges, bypassing OCR entirely
+        if axis == "x":
+            slope = (high - low) / (box.right - box.left)
+            intercept = low - slope * box.left
+        else:
+            slope = (low - high) / (box.bottom - box.top)
+            intercept = high - slope * box.top
+        return AxisCalibration(slope=slope, intercept=intercept, log_scale=False), False
+
+    ticks = detect_tick_positions(image, box, axis=axis)
+    labels = read_axis_tick_labels(image, box, ticks, axis=axis)
+    return fit_axis_calibration(labels, log_scale=False), True
+
+
+def _find_series_color_for_legend(legend_entries: list[LegendEntry]) -> list[tuple[str, tuple[int, int, int]]]:
+    return [(entry.name, entry.color_bgr) for entry in legend_entries]
+
+
+def _dominant_series_color(image: np.ndarray, box: PlotBox) -> tuple[int, int, int]:
+    """Fallback when no legend is found: assumes a single series and picks
+    the most common non-white, non-grayscale color in the plot area."""
+    region = image[box.top:box.bottom, box.left:box.right].reshape(-1, 3)
+    is_colorful = (region.max(axis=1).astype(int) - region.min(axis=1).astype(int)) > 20
+    colorful_pixels = region[is_colorful]
+    if len(colorful_pixels) == 0:
+        raise ValueError("No colored curve/marker pixels found in plot area")
+    colors, counts = np.unique(colorful_pixels, axis=0, return_counts=True)
+    return tuple(int(c) for c in colors[np.argmax(counts)])
+
+
+def run_pipeline(
+    image_bytes: bytes,
+    manual_x_range: tuple[float, float] | None = None,
+    manual_y_range: tuple[float, float] | None = None,
+) -> PipelineResult:
+    image = _decode_image(image_bytes)
+    box = detect_plot_box(image)
+    chart_type = classify_chart_type(image, box)
+
+    x_calibration, x_from_ocr = _build_axis_calibration(image, box, "x", manual_x_range)
+    y_calibration, y_from_ocr = _build_axis_calibration(image, box, "y", manual_y_range)
+
+    legend_entries = detect_legend_entries(image, box)
+    named_colors = _find_series_color_for_legend(legend_entries)
+    if not named_colors:
+        named_colors = [("Series A", _dominant_series_color(image, box))]
+
+    series_results: list[SeriesResult] = []
+    for name, color_bgr in named_colors:
+        mask = isolate_series_mask(image, box, color_bgr, tolerance=60)
+
+        if chart_type == ChartType.BAR:
+            points = extract_bar_heights(mask, box, x_calibration, y_calibration)
+            censoring: list[tuple[float, float]] = []
+        elif chart_type == ChartType.SCATTER:
+            points = extract_scatter_points(mask, box, x_calibration, y_calibration)
+            censoring = []
+        elif chart_type == ChartType.KAPLAN_MEIER:
+            points = trace_line_curve(mask, box, x_calibration, y_calibration, step=True)
+            censoring = detect_censoring_marks(mask, box, x_calibration, y_calibration)
+        else:  # LINE
+            points = trace_line_curve(mask, box, x_calibration, y_calibration, step=False)
+            censoring = []
+
+        series_results.append(
+            SeriesResult(name=name, color_bgr=color_bgr, points=points, censoring_marks=censoring)
+        )
+
+    from app.pipeline.overlay import draw_overlay
+
+    overlay_image = draw_overlay(
+        image, box, x_calibration, y_calibration,
+        [{"name": s.name, "color_bgr": s.color_bgr, "points": s.points} for s in series_results],
+    )
+    success, overlay_encoded = cv2.imencode(".png", overlay_image)
+    if not success:
+        raise ValueError("Failed to encode overlay image")
+
+    return PipelineResult(
+        chart_type=chart_type.value,
+        series=series_results,
+        overlay_image_png=overlay_encoded.tobytes(),
+        x_axis_calibrated_from_ocr=x_from_ocr,
+        y_axis_calibrated_from_ocr=y_from_ocr,
+    )
+```
+
+- [ ] **Step 4: Run test to verify it passes**
+
+Run: `cd backend && pytest tests/test_pipeline.py -v`
+Expected: PASS. This test exercises the full stack, so a failure could originate in any earlier module — check which assertion fails first and re-run that module's own test file to narrow it down.
+
+- [ ] **Step 5: Run the full backend test suite to confirm no regressions**
+
+Run: `cd backend && pytest -v`
+Expected: all tests across every module PASS.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add backend/app/pipeline/pipeline.py backend/tests/test_pipeline.py
+git commit -m "feat: orchestrate full extraction pipeline with manual axis override support"
+```
+
+---
