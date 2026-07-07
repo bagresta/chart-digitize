@@ -2482,3 +2482,150 @@ git commit -m "feat: add frontend pixel-to-data calibration math for live point 
 ```
 
 ---
+
+## Task 20: Login page
+
+**Files:**
+- Create: `frontend/src/pages/Login.tsx`
+
+- [ ] **Step 1: Implement the login page**
+
+`frontend/src/pages/Login.tsx`:
+```tsx
+import { FormEvent, useState } from "react";
+import { useNavigate } from "react-router-dom";
+import { login } from "../api";
+
+export function Login() {
+  const [password, setPassword] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const [submitting, setSubmitting] = useState(false);
+  const navigate = useNavigate();
+
+  async function handleSubmit(event: FormEvent) {
+    event.preventDefault();
+    setError(null);
+    setSubmitting(true);
+    try {
+      await login(password);
+      navigate("/upload");
+    } catch {
+      setError("Incorrect password");
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  return (
+    <form onSubmit={handleSubmit} style={{ maxWidth: 320, margin: "80px auto" }}>
+      <h1>Chart Digitizer</h1>
+      <input
+        type="password"
+        value={password}
+        onChange={(event) => setPassword(event.target.value)}
+        placeholder="Password"
+        style={{ width: "100%", padding: 8 }}
+      />
+      {error && <p style={{ color: "red" }}>{error}</p>}
+      <button type="submit" disabled={submitting} style={{ marginTop: 12, width: "100%", padding: 8 }}>
+        {submitting ? "Signing in..." : "Sign in"}
+      </button>
+    </form>
+  );
+}
+```
+
+- [ ] **Step 2: Commit**
+
+```bash
+git add frontend/src/pages/Login.tsx
+git commit -m "feat: add login page"
+```
+
+---
+
+## Task 21: Upload page
+
+**Files:**
+- Create: `frontend/src/pages/Upload.tsx`
+
+- [ ] **Step 1: Implement the upload page**
+
+`frontend/src/pages/Upload.tsx`:
+```tsx
+import { ChangeEvent, DragEvent, useState } from "react";
+import { useNavigate } from "react-router-dom";
+import { uploadChart } from "../api";
+import type { UploadResult } from "../types";
+
+interface UploadPageProps {
+  onUploaded: (result: UploadResult, imageDataUrl: string) => void;
+}
+
+export function Upload({ onUploaded }: UploadPageProps) {
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const navigate = useNavigate();
+
+  async function handleFile(file: File) {
+    setError(null);
+    setLoading(true);
+    try {
+      const reader = new FileReader();
+      const imageDataUrlPromise = new Promise<string>((resolve) => {
+        reader.onload = () => resolve(reader.result as string);
+      });
+      reader.readAsDataURL(file);
+
+      const result = await uploadChart(file);
+      onUploaded(result, await imageDataUrlPromise);
+      navigate("/review");
+    } catch {
+      setError("Couldn't process this image. Try a clearer chart image, or a different file.");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  function handleDrop(event: DragEvent<HTMLDivElement>) {
+    event.preventDefault();
+    const file = event.dataTransfer.files[0];
+    if (file) handleFile(file);
+  }
+
+  function handleFileInput(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    if (file) handleFile(file);
+  }
+
+  return (
+    <div style={{ maxWidth: 480, margin: "80px auto", textAlign: "center" }}>
+      <h1>Upload a chart image</h1>
+      <div
+        onDrop={handleDrop}
+        onDragOver={(event) => event.preventDefault()}
+        style={{ border: "2px dashed #999", borderRadius: 8, padding: 48, cursor: "pointer" }}
+      >
+        {loading ? (
+          <p>Processing...</p>
+        ) : (
+          <>
+            <p>Drag and drop a JPEG or PNG chart image here, or</p>
+            <input type="file" accept="image/jpeg,image/png" onChange={handleFileInput} />
+          </>
+        )}
+      </div>
+      {error && <p style={{ color: "red" }}>{error}</p>}
+    </div>
+  );
+}
+```
+
+- [ ] **Step 2: Commit**
+
+```bash
+git add frontend/src/pages/Upload.tsx
+git commit -m "feat: add upload page with drag-and-drop"
+```
+
+---
