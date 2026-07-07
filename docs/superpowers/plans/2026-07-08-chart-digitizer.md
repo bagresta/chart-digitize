@@ -2185,3 +2185,300 @@ git commit -m "feat: add CSV/Excel export endpoints"
 ```
 
 ---
+
+## Task 17: Frontend scaffolding
+
+**Files:**
+- Create: `frontend/package.json`, `frontend/vite.config.ts`, `frontend/tsconfig.json`, `frontend/index.html`
+- Create: `frontend/src/main.tsx`, `frontend/src/App.tsx`, `frontend/src/types.ts`
+
+- [ ] **Step 1: Scaffold the Vite React-TS project**
+
+```bash
+cd frontend
+npm create vite@latest . -- --template react-ts
+npm install
+npm install react-konva konva react-router-dom
+npm install -D vitest @testing-library/react @testing-library/jest-dom jsdom
+```
+
+- [ ] **Step 2: Add a Vitest config block to `frontend/vite.config.ts`**
+
+```typescript
+/// <reference types="vitest/config" />
+import react from "@vitejs/plugin-react";
+import { defineConfig } from "vite";
+
+export default defineConfig({
+  plugins: [react()],
+  test: {
+    environment: "jsdom",
+    globals: true,
+  },
+});
+```
+
+- [ ] **Step 3: Define shared types**
+
+`frontend/src/types.ts`:
+```typescript
+export interface SeriesData {
+  name: string;
+  colorBgr: [number, number, number];
+  points: [number, number][];
+  censoringMarks: [number, number][];
+}
+
+export interface UploadResult {
+  chartType: string;
+  series: SeriesData[];
+  overlayImageBase64: string;
+  xAxisCalibratedFromOcr: boolean;
+  yAxisCalibratedFromOcr: boolean;
+}
+```
+
+- [ ] **Step 4: Verify the scaffold builds**
+
+Run: `cd frontend && npm run build`
+Expected: build succeeds with no errors (default Vite template output).
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add frontend/
+git commit -m "feat: scaffold Vite React-TypeScript frontend"
+```
+
+---
+
+## Task 18: API client wrapper
+
+**Files:**
+- Create: `frontend/src/api.ts`
+- Test: `frontend/src/api.test.ts`
+
+- [ ] **Step 1: Write the failing test**
+
+`frontend/src/api.test.ts`:
+```typescript
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { login, uploadChart } from "./api";
+
+describe("api client", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("login posts the password and resolves on success", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await login("hunter2");
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      expect.stringContaining("/api/login"),
+      expect.objectContaining({
+        method: "POST",
+        credentials: "include",
+        body: JSON.stringify({ password: "hunter2" }),
+      }),
+    );
+  });
+
+  it("login throws on a 401 response", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: false, status: 401 }));
+
+    await expect(login("wrong")).rejects.toThrow();
+  });
+
+  it("uploadChart sends the file and returns parsed JSON", async () => {
+    const responseBody = { chart_type: "line", series: [], overlay_image_base64: "", x_axis_calibrated_from_ocr: true, y_axis_calibrated_from_ocr: true };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({ ok: true, json: async () => responseBody }),
+    );
+
+    const file = new File(["fake"], "chart.png", { type: "image/png" });
+    const result = await uploadChart(file);
+
+    expect(result.chartType).toBe("line");
+  });
+});
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `cd frontend && npx vitest run src/api.test.ts`
+Expected: FAIL — `src/api.ts` doesn't exist.
+
+- [ ] **Step 3: Implement the API client**
+
+`frontend/src/api.ts`:
+```typescript
+import type { SeriesData, UploadResult } from "./types";
+
+const API_BASE = import.meta.env.VITE_API_BASE_URL ?? "http://localhost:8000";
+
+export async function login(password: string): Promise<void> {
+  const response = await fetch(`${API_BASE}/api/login`, {
+    method: "POST",
+    credentials: "include",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ password }),
+  });
+  if (!response.ok) {
+    throw new Error("Login failed");
+  }
+}
+
+export async function uploadChart(file: File): Promise<UploadResult> {
+  const formData = new FormData();
+  formData.append("file", file);
+
+  const response = await fetch(`${API_BASE}/api/upload`, {
+    method: "POST",
+    credentials: "include",
+    body: formData,
+  });
+  if (!response.ok) {
+    throw new Error("Upload failed");
+  }
+  const body = await response.json();
+  return {
+    chartType: body.chart_type,
+    series: body.series.map((s: any) => ({
+      name: s.name,
+      colorBgr: s.color_bgr,
+      points: s.points,
+      censoringMarks: s.censoring_marks,
+    })),
+    overlayImageBase64: body.overlay_image_base64,
+    xAxisCalibratedFromOcr: body.x_axis_calibrated_from_ocr,
+    yAxisCalibratedFromOcr: body.y_axis_calibrated_from_ocr,
+  };
+}
+
+async function downloadExport(path: string, series: SeriesData[], filename: string): Promise<void> {
+  const response = await fetch(`${API_BASE}${path}`, {
+    method: "POST",
+    credentials: "include",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ series: series.map((s) => ({ name: s.name, points: s.points })) }),
+  });
+  if (!response.ok) {
+    throw new Error("Export failed");
+  }
+  const blob = await response.blob();
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = filename;
+  anchor.click();
+  URL.revokeObjectURL(url);
+}
+
+export const exportCsv = (series: SeriesData[]) => downloadExport("/api/export/csv", series, "chart_data.csv");
+export const exportExcel = (series: SeriesData[]) => downloadExport("/api/export/excel", series, "chart_data.xlsx");
+```
+
+- [ ] **Step 4: Run test to verify it passes**
+
+Run: `cd frontend && npx vitest run src/api.test.ts`
+Expected: PASS
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add frontend/src/api.ts frontend/src/api.test.ts
+git commit -m "feat: add typed API client for login/upload/export"
+```
+
+---
+
+## Task 19: Pixel-data calibration math (for live drag recompute)
+
+This is the frontend equivalent of the backend's `calibration.py` — when the user drags a point or an axis marker on the canvas, this converts between screen pixels and chart data values without a server round-trip.
+
+**Files:**
+- Create: `frontend/src/calibration.ts`
+- Test: `frontend/src/calibration.test.ts`
+
+- [ ] **Step 1: Write the failing test**
+
+`frontend/src/calibration.test.ts`:
+```typescript
+import { describe, expect, it } from "vitest";
+import { fitCalibration, pixelToValue, valueToPixel } from "./calibration";
+
+describe("calibration", () => {
+  it("fits a linear mapping from two reference points", () => {
+    // y-axis: pixel 300 = value 0, pixel 0 = value 100 (pixels increase downward)
+    const calibration = fitCalibration([
+      { pixel: 300, value: 0 },
+      { pixel: 0, value: 100 },
+    ]);
+
+    expect(pixelToValue(calibration, 150)).toBeCloseTo(50, 1);
+  });
+
+  it("valueToPixel is the inverse of pixelToValue", () => {
+    const calibration = fitCalibration([
+      { pixel: 300, value: 0 },
+      { pixel: 0, value: 100 },
+    ]);
+
+    const pixel = valueToPixel(calibration, 73);
+    expect(pixelToValue(calibration, pixel)).toBeCloseTo(73, 1);
+  });
+});
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `cd frontend && npx vitest run src/calibration.test.ts`
+Expected: FAIL — `src/calibration.ts` doesn't exist.
+
+- [ ] **Step 3: Implement calibration math**
+
+`frontend/src/calibration.ts`:
+```typescript
+export interface ReferencePoint {
+  pixel: number;
+  value: number;
+}
+
+export interface Calibration {
+  slope: number;
+  intercept: number;
+}
+
+export function fitCalibration(points: [ReferencePoint, ReferencePoint]): Calibration {
+  const [a, b] = points;
+  const slope = (b.value - a.value) / (b.pixel - a.pixel);
+  const intercept = a.value - slope * a.pixel;
+  return { slope, intercept };
+}
+
+export function pixelToValue(calibration: Calibration, pixel: number): number {
+  return calibration.slope * pixel + calibration.intercept;
+}
+
+export function valueToPixel(calibration: Calibration, value: number): number {
+  return (value - calibration.intercept) / calibration.slope;
+}
+```
+
+- [ ] **Step 4: Run test to verify it passes**
+
+Run: `cd frontend && npx vitest run src/calibration.test.ts`
+Expected: PASS
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add frontend/src/calibration.ts frontend/src/calibration.test.ts
+git commit -m "feat: add frontend pixel-to-data calibration math for live point editing"
+```
+
+---
