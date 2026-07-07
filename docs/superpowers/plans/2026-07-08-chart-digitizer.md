@@ -1620,6 +1620,8 @@ class PipelineResult:
     overlay_image_png: bytes
     x_axis_calibrated_from_ocr: bool
     y_axis_calibrated_from_ocr: bool
+    x_reference_points: list[tuple[float, float]]  # (pixel, value) pairs used to fit x calibration
+    y_reference_points: list[tuple[float, float]]  # (pixel, value) pairs used to fit y calibration
 
 
 def _decode_image(image_bytes: bytes) -> np.ndarray:
@@ -1632,24 +1634,28 @@ def _decode_image(image_bytes: bytes) -> np.ndarray:
 
 def _build_axis_calibration(
     image: np.ndarray, box: PlotBox, axis: str, manual_range: tuple[float, float] | None
-) -> tuple[AxisCalibration, bool]:
+) -> tuple[AxisCalibration, bool, list[tuple[float, float]]]:
     if manual_range is not None:
         low, high = manual_range
-        pixel_start = box.bottom if axis == "x" else box.bottom
-        pixel_end = box.left if axis == "x" else box.top
         # two-point calibration directly from user-provided min/max at the
         # known plot-box edges, bypassing OCR entirely
         if axis == "x":
             slope = (high - low) / (box.right - box.left)
             intercept = low - slope * box.left
+            reference_points = [(float(box.left), low), (float(box.right), high)]
         else:
             slope = (low - high) / (box.bottom - box.top)
             intercept = high - slope * box.top
-        return AxisCalibration(slope=slope, intercept=intercept, log_scale=False), False
+            reference_points = [(float(box.bottom), low), (float(box.top), high)]
+        return AxisCalibration(slope=slope, intercept=intercept, log_scale=False), False, reference_points
 
     ticks = detect_tick_positions(image, box, axis=axis)
     labels = read_axis_tick_labels(image, box, ticks, axis=axis)
-    return fit_axis_calibration(labels, log_scale=False), True
+    calibration = fit_axis_calibration(labels, log_scale=False)
+    reference_points = [
+        (float(label.pixel_position), label.value) for label in labels if label.value is not None
+    ]
+    return calibration, True, reference_points
 
 
 def _find_series_color_for_legend(legend_entries: list[LegendEntry]) -> list[tuple[str, tuple[int, int, int]]]:
@@ -1677,8 +1683,8 @@ def run_pipeline(
     box = detect_plot_box(image)
     chart_type = classify_chart_type(image, box)
 
-    x_calibration, x_from_ocr = _build_axis_calibration(image, box, "x", manual_x_range)
-    y_calibration, y_from_ocr = _build_axis_calibration(image, box, "y", manual_y_range)
+    x_calibration, x_from_ocr, x_reference_points = _build_axis_calibration(image, box, "x", manual_x_range)
+    y_calibration, y_from_ocr, y_reference_points = _build_axis_calibration(image, box, "y", manual_y_range)
 
     legend_entries = detect_legend_entries(image, box)
     named_colors = _find_series_color_for_legend(legend_entries)
@@ -1722,6 +1728,8 @@ def run_pipeline(
         overlay_image_png=overlay_encoded.tobytes(),
         x_axis_calibrated_from_ocr=x_from_ocr,
         y_axis_calibrated_from_ocr=y_from_ocr,
+        x_reference_points=x_reference_points,
+        y_reference_points=y_reference_points,
     )
 ```
 
@@ -1936,6 +1944,8 @@ class UploadResponse(BaseModel):
     overlay_image_base64: str
     x_axis_calibrated_from_ocr: bool
     y_axis_calibrated_from_ocr: bool
+    x_reference_points: list[tuple[float, float]]
+    y_reference_points: list[tuple[float, float]]
 ```
 
 Replace `backend/app/main.py` with:
@@ -2001,6 +2011,8 @@ async def upload(file: UploadFile, session: str | None = Cookie(default=None)):
         overlay_image_base64=base64.b64encode(result.overlay_image_png).decode("ascii"),
         x_axis_calibrated_from_ocr=result.x_axis_calibrated_from_ocr,
         y_axis_calibrated_from_ocr=result.y_axis_calibrated_from_ocr,
+        x_reference_points=result.x_reference_points,
+        y_reference_points=result.y_reference_points,
     )
 ```
 
@@ -2235,6 +2247,8 @@ export interface UploadResult {
   overlayImageBase64: string;
   xAxisCalibratedFromOcr: boolean;
   yAxisCalibratedFromOcr: boolean;
+  xReferencePoints: [number, number][]; // (pixel, value) pairs
+  yReferencePoints: [number, number][];
 }
 ```
 
@@ -2293,7 +2307,15 @@ describe("api client", () => {
   });
 
   it("uploadChart sends the file and returns parsed JSON", async () => {
-    const responseBody = { chart_type: "line", series: [], overlay_image_base64: "", x_axis_calibrated_from_ocr: true, y_axis_calibrated_from_ocr: true };
+    const responseBody = {
+      chart_type: "line",
+      series: [],
+      overlay_image_base64: "",
+      x_axis_calibrated_from_ocr: true,
+      y_axis_calibrated_from_ocr: true,
+      x_reference_points: [[10, 0], [300, 10]],
+      y_reference_points: [[10, 100], [300, 0]],
+    };
     vi.stubGlobal(
       "fetch",
       vi.fn().mockResolvedValue({ ok: true, json: async () => responseBody }),
@@ -2356,6 +2378,8 @@ export async function uploadChart(file: File): Promise<UploadResult> {
     overlayImageBase64: body.overlay_image_base64,
     xAxisCalibratedFromOcr: body.x_axis_calibrated_from_ocr,
     yAxisCalibratedFromOcr: body.y_axis_calibrated_from_ocr,
+    xReferencePoints: body.x_reference_points,
+    yReferencePoints: body.y_reference_points,
   };
 }
 
