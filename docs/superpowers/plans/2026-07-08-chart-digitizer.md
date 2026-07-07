@@ -729,3 +729,279 @@ git commit -m "feat: detect legend entries (color swatch + series name)"
 ```
 
 ---
+
+## Task 6: Pixel-to-data calibration (linear + log)
+
+**Files:**
+- Create: `backend/app/pipeline/calibration.py`
+- Test: `backend/tests/test_calibration.py`
+
+- [ ] **Step 1: Write the failing test**
+
+`backend/tests/test_calibration.py`:
+```python
+import pytest
+
+from app.pipeline.calibration import AxisCalibration, fit_axis_calibration
+from app.pipeline.ocr import TickLabel
+
+
+def test_fit_linear_calibration_maps_pixels_to_values():
+    # 5 ticks evenly spaced in pixels, matching evenly spaced values 0..100
+    labels = [
+        TickLabel(pixel_position=300, text="0", value=0.0),
+        TickLabel(pixel_position=225, text="25", value=25.0),
+        TickLabel(pixel_position=150, text="50", value=50.0),
+        TickLabel(pixel_position=75, text="75", value=75.0),
+        TickLabel(pixel_position=0, text="100", value=100.0),
+    ]
+
+    calibration = fit_axis_calibration(labels, log_scale=False)
+
+    assert calibration.pixel_to_value(300) == pytest.approx(0.0, abs=0.5)
+    assert calibration.pixel_to_value(150) == pytest.approx(50.0, abs=0.5)
+    assert calibration.pixel_to_value(0) == pytest.approx(100.0, abs=0.5)
+
+
+def test_fit_calibration_ignores_unreadable_ticks():
+    labels = [
+        TickLabel(pixel_position=300, text="0", value=0.0),
+        TickLabel(pixel_position=225, text="", value=None),  # OCR failed on this one
+        TickLabel(pixel_position=150, text="50", value=50.0),
+        TickLabel(pixel_position=0, text="100", value=100.0),
+    ]
+
+    calibration = fit_axis_calibration(labels, log_scale=False)
+
+    assert calibration.pixel_to_value(150) == pytest.approx(50.0, abs=0.5)
+
+
+def test_fit_calibration_raises_with_fewer_than_two_readable_ticks():
+    labels = [TickLabel(pixel_position=300, text="0", value=0.0)]
+
+    with pytest.raises(ValueError, match="at least 2"):
+        fit_axis_calibration(labels, log_scale=False)
+
+
+def test_fit_log_calibration():
+    labels = [
+        TickLabel(pixel_position=300, text="1", value=1.0),
+        TickLabel(pixel_position=200, text="10", value=10.0),
+        TickLabel(pixel_position=100, text="100", value=100.0),
+    ]
+
+    calibration = fit_axis_calibration(labels, log_scale=True)
+
+    assert calibration.pixel_to_value(300) == pytest.approx(1.0, rel=0.05)
+    assert calibration.pixel_to_value(200) == pytest.approx(10.0, rel=0.05)
+    assert calibration.pixel_to_value(100) == pytest.approx(100.0, rel=0.05)
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `cd backend && pytest tests/test_calibration.py -v`
+Expected: FAIL — `ModuleNotFoundError: No module named 'app.pipeline.calibration'`
+
+- [ ] **Step 3: Implement calibration fitting**
+
+`backend/app/pipeline/calibration.py`:
+```python
+"""Fits a pixel-position -> data-value mapping from a set of OCR'd tick
+labels, using least-squares linear regression (or log10-space regression for
+log-scaled axes). Ticks whose OCR text didn't parse as a number are dropped
+before fitting."""
+from dataclasses import dataclass
+
+import numpy as np
+
+from app.pipeline.ocr import TickLabel
+
+
+@dataclass
+class AxisCalibration:
+    slope: float
+    intercept: float
+    log_scale: bool
+
+    def pixel_to_value(self, pixel: float) -> float:
+        raw = self.slope * pixel + self.intercept
+        return 10 ** raw if self.log_scale else raw
+
+
+def fit_axis_calibration(labels: list[TickLabel], log_scale: bool) -> AxisCalibration:
+    readable = [label for label in labels if label.value is not None]
+    if len(readable) < 2:
+        raise ValueError(f"Need at least 2 readable tick labels to calibrate, got {len(readable)}")
+
+    pixels = np.array([label.pixel_position for label in readable], dtype=float)
+    values = np.array([label.value for label in readable], dtype=float)
+
+    if log_scale:
+        if np.any(values <= 0):
+            raise ValueError("Log-scale axis cannot have zero or negative tick values")
+        values = np.log10(values)
+
+    slope, intercept = np.polyfit(pixels, values, deg=1)
+    return AxisCalibration(slope=float(slope), intercept=float(intercept), log_scale=log_scale)
+```
+
+- [ ] **Step 4: Run test to verify it passes**
+
+Run: `cd backend && pytest tests/test_calibration.py -v`
+Expected: PASS
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add backend/app/pipeline/calibration.py backend/tests/test_calibration.py
+git commit -m "feat: fit pixel-to-data axis calibration (linear and log scale)"
+```
+
+---
+
+## Task 7: Chart-type classification heuristic
+
+**Files:**
+- Create: `backend/app/pipeline/classify.py`
+- Test: `backend/tests/test_classify.py`
+
+- [ ] **Step 1: Write the failing test**
+
+`backend/tests/test_classify.py`:
+```python
+from app.pipeline.classify import ChartType, classify_chart_type
+from app.pipeline.geometry import detect_plot_box
+from tests.fixtures import make_bar_chart, make_km_chart, make_line_chart, make_scatter_chart
+
+
+def test_classify_line_chart():
+    image, _ = make_line_chart()
+    box = detect_plot_box(image)
+    assert classify_chart_type(image, box) == ChartType.LINE
+
+
+def test_classify_scatter_chart():
+    image, _ = make_scatter_chart()
+    box = detect_plot_box(image)
+    assert classify_chart_type(image, box) == ChartType.SCATTER
+
+
+def test_classify_bar_chart():
+    image, _ = make_bar_chart()
+    box = detect_plot_box(image)
+    assert classify_chart_type(image, box) == ChartType.BAR
+
+
+def test_classify_km_chart():
+    image, _ = make_km_chart()
+    box = detect_plot_box(image)
+    assert classify_chart_type(image, box) == ChartType.KAPLAN_MEIER
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `cd backend && pytest tests/test_classify.py -v`
+Expected: FAIL — `ModuleNotFoundError: No module named 'app.pipeline.classify'`
+
+- [ ] **Step 3: Implement classification heuristic**
+
+`backend/app/pipeline/classify.py`:
+```python
+"""Classifies chart type from plotted shape characteristics — no OCR or
+labels needed. Order of checks matters: bar charts are ruled in first since
+they have the most distinctive signature (large filled rectangular blobs
+sharing a common baseline), then step-function detection distinguishes
+Kaplan-Meier curves from ordinary line charts, then remaining charts are
+split into line vs. scatter by how much of each column-of-pixels forms a
+continuous stroke versus isolated blobs."""
+from enum import Enum
+
+import cv2
+import numpy as np
+
+from app.pipeline.geometry import PlotBox
+
+
+class ChartType(str, Enum):
+    LINE = "line"
+    SCATTER = "scatter"
+    BAR = "bar"
+    KAPLAN_MEIER = "kaplan_meier"
+
+
+def _non_background_mask(region: np.ndarray) -> np.ndarray:
+    gray = cv2.cvtColor(region, cv2.COLOR_BGR2GRAY)
+    _, mask = cv2.threshold(gray, 245, 255, cv2.THRESH_BINARY_INV)
+    return mask
+
+
+def _is_bar_chart(mask: np.ndarray) -> bool:
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    h = mask.shape[0]
+    bar_like = 0
+    for contour in contours:
+        x, y, w, cy = cv2.boundingRect(contour)
+        area = w * cy
+        if area < mask.size * 0.01:
+            continue
+        # bars are tall filled rectangles that touch (or nearly touch) the bottom
+        fill_ratio = cv2.contourArea(contour) / area if area else 0
+        touches_bottom = (y + cy) >= h - 5
+        if fill_ratio > 0.85 and touches_bottom and cy > w:
+            bar_like += 1
+    return bar_like >= 1
+
+
+def _has_step_pattern(mask: np.ndarray) -> bool:
+    """Step functions have many horizontal runs connected by short vertical
+    jumps — approximate by counting columns where the stroke's vertical
+    extent is near-zero (flat run) versus columns with a tall vertical jump."""
+    column_extents = []
+    for col in range(mask.shape[1]):
+        rows = np.where(mask[:, col] > 0)[0]
+        if len(rows) == 0:
+            continue
+        column_extents.append(rows.max() - rows.min())
+
+    if not column_extents:
+        return False
+
+    extents = np.array(column_extents)
+    flat_columns = np.sum(extents < 3)
+    jump_columns = np.sum(extents > mask.shape[0] * 0.05)
+    return flat_columns > len(extents) * 0.5 and jump_columns > 0
+
+
+def _is_scatter(mask: np.ndarray) -> bool:
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    small_blobs = [c for c in contours if cv2.contourArea(c) < mask.size * 0.02]
+    # scatter: many small, disconnected blobs rather than one continuous stroke
+    return len(small_blobs) >= 6
+
+
+def classify_chart_type(image: np.ndarray, box: PlotBox) -> ChartType:
+    region = image[box.top:box.bottom, box.left:box.right]
+    mask = _non_background_mask(region)
+
+    if _is_bar_chart(mask):
+        return ChartType.BAR
+    if _has_step_pattern(mask):
+        return ChartType.KAPLAN_MEIER
+    if _is_scatter(mask):
+        return ChartType.SCATTER
+    return ChartType.LINE
+```
+
+- [ ] **Step 4: Run test to verify it passes**
+
+Run: `cd backend && pytest tests/test_classify.py -v`
+Expected: PASS. If a chart type is misclassified, print the intermediate `mask` stats (`flat_columns`, `jump_columns`, blob count) for that fixture and tune the thresholds — these are heuristics, not exact rules, and thresholds may need adjusting once tested against real (non-synthetic) chart images later in Task 15.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add backend/app/pipeline/classify.py backend/tests/test_classify.py
+git commit -m "feat: classify chart type (line/scatter/bar/Kaplan-Meier) from shape heuristics"
+```
+
+---
