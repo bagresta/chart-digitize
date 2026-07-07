@@ -25,7 +25,7 @@ Two services, both free-tier hosted:
 - **Frontend**: React SPA (Vite), deployed to Vercel. Canvas-based image
   viewer/editor (Konva or Fabric.js) for the review/correction step.
 - **Backend**: Python FastAPI, deployed to Render. Runs the extraction
-  pipeline and calls the Anthropic API for label reading. Stateless —
+  pipeline, including OCR via Tesseract for label reading. Stateless —
   uploaded images are processed in memory per-request and never persisted to
   disk or a database.
 
@@ -40,10 +40,14 @@ deploy but avoids compromising either half.
 
 1. **OpenCV geometric pass** — detect the plot bounding box and axis lines
    (Hough transform), locate tick mark pixel positions along each axis.
-2. **Claude vision pass** — send the image to the Anthropic API, request
-   structured JSON: chart type (line / scatter / bar / Kaplan-Meier), axis
-   titles and units, ordered tick label values per axis, whether an axis is
-   log-scaled, and legend entries (series name + color).
+2. **OCR pass (Tesseract)** — crop and preprocess the regions around each
+   axis (upscale, binarize/threshold, deskew) to maximize read accuracy, then
+   OCR the tick label text and axis titles. Chart type (line / scatter / bar
+   / Kaplan-Meier) and log-scale detection are inferred heuristically from
+   the plotted shapes (e.g. step patterns for KM, discrete bars for bar
+   charts) rather than read from text. Legend entries (series name + color
+   swatch) are located via layout heuristics (small color swatch immediately
+   left of a text run) and OCR'd the same way.
 3. **Calibration** — match OCR'd tick values to detected tick pixel positions
    in order; fit a pixel→data transform (linear or log) per axis.
 4. **Curve/point extraction** — color-cluster the plot area using legend
@@ -81,16 +85,21 @@ deploy but avoids compromising either half.
 ## Error handling
 
 - Unsupported/corrupt file → inline error, no crash.
-- Claude vision call fails or returns unparseable JSON → surfaced as "couldn't
-  read axis labels automatically"; a minimal manual override lets the user
-  type in axis min/max values as a fallback so they are not fully blocked.
+- OCR fails to read tick labels confidently (low confidence score, or text
+  doesn't parse as numbers) → surfaced as "couldn't read axis labels
+  automatically"; a minimal manual override lets the user type in axis
+  min/max values as a fallback so they are not fully blocked. Given OCR is
+  less reliable than a vision LLM on stylized/low-res chart text, expect this
+  fallback to be used more often — worth validating during testing how often
+  it triggers on real figures.
 - No axis lines detected (e.g. borderless chart) → explicit error rather than
   silently producing garbage data.
 
 ## Auth & secrets
 
-- Anthropic API key and shared app password stored as environment variables
-  on Render; never exposed to the frontend bundle.
+- Shared app password stored as an environment variable on Render; never
+  exposed to the frontend bundle. No external API key is required — OCR
+  (Tesseract) runs entirely on the backend server, no LLM API dependency.
 - Simple password form → backend validates → issues signed session token
   (cookie) → required on all API routes.
 
@@ -107,4 +116,6 @@ Before considering this done, verify against real chart types:
 ## Hosting cost
 
 Vercel and Render free tiers cover this usage pattern (low-volume, on-demand
-use). The only recurring cost is the small per-image Anthropic API charge.
+use). With OCR running locally on the backend instead of calling an external
+LLM API, there is no per-image API charge and no external API key to manage
+— hosting is effectively free.
