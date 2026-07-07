@@ -3037,3 +3037,140 @@ git commit -m "feat: wire up app routing between login, upload, and review pages
 ```
 
 ---
+
+## Task 25: Backend Dockerfile (needed because Tesseract requires a system package, not just a pip install)
+
+**Files:**
+- Create: `backend/Dockerfile`
+- Create: `backend/.dockerignore`
+
+- [ ] **Step 1: Write the Dockerfile**
+
+`backend/Dockerfile`:
+```dockerfile
+FROM python:3.11-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    tesseract-ocr \
+    libgl1 \
+    libglib2.0-0 \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY app ./app
+
+EXPOSE 8000
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+```
+
+`backend/.dockerignore`:
+```
+tests/
+__pycache__/
+*.pyc
+.pytest_cache/
+```
+
+- [ ] **Step 2: Build and run the image locally to verify it works**
+
+Run: `cd backend && docker build -t chart-digitizer-backend .`
+Run: `docker run -p 8000:8000 -e APP_PASSWORD=devpass -e SESSION_SECRET_KEY=devsecret chart-digitizer-backend`
+Run (separate terminal): `curl http://localhost:8000/api/health`
+Expected: `{"status":"ok"}`
+
+- [ ] **Step 3: Commit**
+
+```bash
+git add backend/Dockerfile backend/.dockerignore
+git commit -m "build: add backend Dockerfile with Tesseract system dependency"
+```
+
+---
+
+## Task 26: Push to GitHub and deploy backend to Render
+
+Render and Vercel both deploy from a GitHub repo, so this needs a remote first.
+
+- [ ] **Step 1: Create a GitHub repository and push**
+
+Ask the user to create an empty repo (e.g. `chart-digitizer`) at github.com/new, then:
+
+```bash
+git remote add origin https://github.com/<your-username>/chart-digitizer.git
+git push -u origin master
+```
+
+- [ ] **Step 2: Create the Anthropic-free Render Web Service**
+
+In the Render dashboard (render.com):
+1. New → Web Service → connect the `chart-digitizer` GitHub repo.
+2. Root directory: `backend`
+3. Environment: Docker (Render auto-detects the `Dockerfile`)
+4. Instance type: Free
+5. Environment variables:
+   - `APP_PASSWORD` = a password you choose
+   - `SESSION_SECRET_KEY` = a long random string (e.g. generate with `openssl rand -hex 32`)
+6. Create Web Service and wait for the first deploy to finish.
+
+- [ ] **Step 3: Verify the deployed backend**
+
+Run: `curl https://<your-service-name>.onrender.com/api/health`
+Expected: `{"status":"ok"}`
+
+Note: Render's free tier spins down after inactivity, so the first request after idling may take ~30-60s to respond — mention this to the user so a slow first load isn't mistaken for a bug.
+
+---
+
+## Task 27: Deploy frontend to Vercel
+
+- [ ] **Step 1: Create the Vercel project**
+
+In the Vercel dashboard (vercel.com):
+1. New Project → import the `chart-digitizer` GitHub repo.
+2. Root directory: `frontend`
+3. Framework preset: Vite (auto-detected)
+4. Environment variable: `VITE_API_BASE_URL` = `https://<your-service-name>.onrender.com` (the Render URL from Task 26)
+5. Deploy.
+
+- [ ] **Step 2: Update backend CORS to the real frontend origin**
+
+`backend/app/main.py:9-15` currently allows `allow_origins=["*"]`. Once the Vercel URL is known, tighten this:
+
+```python
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["https://<your-vercel-project>.vercel.app"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+```
+
+Commit and push this change so Render redeploys with the restricted origin:
+
+```bash
+git add backend/app/main.py
+git commit -m "chore: restrict backend CORS to deployed frontend origin"
+git push
+```
+
+---
+
+## Task 28: End-to-end smoke test on the deployed app
+
+- [ ] **Step 1: Full walkthrough on the live URLs**
+
+Open the Vercel URL in a browser and repeat the manual verification from Task 24, Step 3, against the deployed app instead of localhost:
+1. Log in with the `APP_PASSWORD` set in Render.
+2. Upload a real Kaplan-Meier curve image.
+3. Confirm extraction, drag-correction, and CSV/Excel export all work end-to-end against the deployed backend.
+
+- [ ] **Step 2: Confirm no secrets are exposed**
+
+Run: `curl https://<your-vercel-project>.vercel.app` and view page source — confirm no `APP_PASSWORD` or `SESSION_SECRET_KEY` value appears anywhere in the served frontend bundle (they shouldn't, since both are backend-only env vars never referenced in frontend code, but this is worth a final check before calling the app done).
+
+This completes the implementation. Any accuracy issues found against real chart images (as opposed to the synthetic matplotlib fixtures used in automated tests) should be logged as follow-up tuning work against the specific pipeline module responsible — the design's "manual axis override" and "add/delete point" fallbacks exist precisely to keep the app usable while that tuning happens.
