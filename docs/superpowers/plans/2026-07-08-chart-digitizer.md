@@ -3174,3 +3174,320 @@ Open the Vercel URL in a browser and repeat the manual verification from Task 24
 Run: `curl https://<your-vercel-project>.vercel.app` and view page source — confirm no `APP_PASSWORD` or `SESSION_SECRET_KEY` value appears anywhere in the served frontend bundle (they shouldn't, since both are backend-only env vars never referenced in frontend code, but this is worth a final check before calling the app done).
 
 This completes the implementation. Any accuracy issues found against real chart images (as opposed to the synthetic matplotlib fixtures used in automated tests) should be logged as follow-up tuning work against the specific pipeline module responsible — the design's "manual axis override" and "add/delete point" fallbacks exist precisely to keep the app usable while that tuning happens.
+
+---
+
+## Task 29: Wire up the manual axis-override fallback
+
+`run_pipeline` (Task 13) already accepts `manual_x_range`/`manual_y_range`, but nothing in the API or frontend lets a user actually supply them yet — this closes that gap so the "couldn't read axis labels automatically" error handling from the design spec has a real recovery path instead of being a dead end.
+
+**Files:**
+- Modify: `backend/app/pipeline/pipeline.py`
+- Modify: `backend/app/main.py`
+- Modify: `frontend/src/api.ts`, `frontend/src/pages/Upload.tsx`
+- Test: `backend/tests/test_pipeline.py`, `backend/tests/test_api.py`
+
+- [ ] **Step 1: Write the failing backend test for a distinguishable calibration error**
+
+Add to `backend/tests/test_pipeline.py`:
+```python
+from app.pipeline.pipeline import AxisCalibrationError
+
+
+def test_run_pipeline_raises_axis_calibration_error_when_ocr_finds_no_numbers(monkeypatch):
+    from app.pipeline import pipeline as pipeline_module
+
+    def _unreadable_labels(*args, **kwargs):
+        from app.pipeline.ocr import TickLabel
+        return [TickLabel(pixel_position=10, text="???", value=None)]
+
+    monkeypatch.setattr(pipeline_module, "read_axis_tick_labels", _unreadable_labels)
+
+    image, _ = make_line_chart()
+    with pytest.raises(AxisCalibrationError):
+        run_pipeline(_encode(image))
+```
+
+(Add `import pytest` if not already present in that test file.)
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `cd backend && pytest tests/test_pipeline.py -v`
+Expected: FAIL — `ImportError: cannot import name 'AxisCalibrationError'`
+
+- [ ] **Step 3: Add the distinguishable exception type**
+
+In `backend/app/pipeline/pipeline.py`, add near the top (after imports):
+```python
+class AxisCalibrationError(ValueError):
+    """Raised when axis tick labels couldn't be read via OCR and no manual
+    override was supplied — the caller should offer the user a manual
+    min/max entry form and retry."""
+```
+
+In `_build_axis_calibration`, wrap the OCR path's calibration call:
+```python
+    ticks = detect_tick_positions(image, box, axis=axis)
+    labels = read_axis_tick_labels(image, box, ticks, axis=axis)
+    try:
+        calibration = fit_axis_calibration(labels, log_scale=False)
+    except ValueError as error:
+        raise AxisCalibrationError(str(error)) from error
+    reference_points = [
+        (float(label.pixel_position), label.value) for label in labels if label.value is not None
+    ]
+    return calibration, True, reference_points
+```
+
+- [ ] **Step 4: Run test to verify it passes**
+
+Run: `cd backend && pytest tests/test_pipeline.py -v`
+Expected: PASS
+
+- [ ] **Step 5: Accept manual override params on the upload endpoint and return a distinguishable error**
+
+Modify `backend/app/main.py` — update the `upload` route:
+```python
+from fastapi import Form
+
+from app.pipeline.pipeline import AxisCalibrationError
+
+
+@app.post("/api/upload", response_model=UploadResponse)
+async def upload(
+    file: UploadFile,
+    session: str | None = Cookie(default=None),
+    manual_x_min: float | None = Form(default=None),
+    manual_x_max: float | None = Form(default=None),
+    manual_y_min: float | None = Form(default=None),
+    manual_y_max: float | None = Form(default=None),
+):
+    _require_session(session)
+
+    manual_x_range = (manual_x_min, manual_x_max) if manual_x_min is not None and manual_x_max is not None else None
+    manual_y_range = (manual_y_min, manual_y_max) if manual_y_min is not None and manual_y_max is not None else None
+
+    image_bytes = await file.read()
+    try:
+        result = run_pipeline(image_bytes, manual_x_range=manual_x_range, manual_y_range=manual_y_range)
+    except AxisCalibrationError:
+        raise HTTPException(status_code=422, detail={"error": "axis_calibration_failed", "message": "Couldn't read axis labels automatically. Enter axis min/max values to continue."})
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail={"error": "processing_failed", "message": str(error)})
+```
+(the rest of the function body — building and returning `UploadResponse` — stays as it was in Task 15).
+
+- [ ] **Step 6: Write and run the API test for the retry path**
+
+Add to `backend/tests/test_api.py`:
+```python
+def test_upload_returns_structured_error_on_axis_calibration_failure(monkeypatch):
+    import app.main as main_module
+
+    def _raise_calibration_error(*args, **kwargs):
+        from app.pipeline.pipeline import AxisCalibrationError
+        raise AxisCalibrationError("no readable ticks")
+
+    monkeypatch.setattr(main_module, "run_pipeline", _raise_calibration_error)
+
+    cookies = _login_client()
+    image, _ = make_line_chart()
+    success, buf = cv2.imencode(".png", image)
+    response = client.post(
+        "/api/upload", files={"file": ("chart.png", buf.tobytes(), "image/png")}, cookies=cookies
+    )
+    assert response.status_code == 422
+    assert response.json()["detail"]["error"] == "axis_calibration_failed"
+
+
+def test_upload_with_manual_axis_range_succeeds():
+    cookies = _login_client()
+    image, _ = make_line_chart()
+    success, buf = cv2.imencode(".png", image)
+    response = client.post(
+        "/api/upload",
+        files={"file": ("chart.png", buf.tobytes(), "image/png")},
+        data={"manual_x_min": "0", "manual_x_max": "10", "manual_y_min": "0", "manual_y_max": "100"},
+        cookies=cookies,
+    )
+    assert response.status_code == 200
+```
+
+Run: `cd backend && pytest tests/test_api.py -v`
+Expected: PASS
+
+- [ ] **Step 7: Update the frontend API client to support the retry**
+
+Modify `frontend/src/api.ts` — replace the `uploadChart` function:
+```typescript
+export interface ManualAxisRange {
+  xMin: number;
+  xMax: number;
+  yMin: number;
+  yMax: number;
+}
+
+export class AxisCalibrationFailedError extends Error {}
+
+export async function uploadChart(file: File, manualRange?: ManualAxisRange): Promise<UploadResult> {
+  const formData = new FormData();
+  formData.append("file", file);
+  if (manualRange) {
+    formData.append("manual_x_min", String(manualRange.xMin));
+    formData.append("manual_x_max", String(manualRange.xMax));
+    formData.append("manual_y_min", String(manualRange.yMin));
+    formData.append("manual_y_max", String(manualRange.yMax));
+  }
+
+  const response = await fetch(`${API_BASE}/api/upload`, {
+    method: "POST",
+    credentials: "include",
+    body: formData,
+  });
+  if (!response.ok) {
+    const body = await response.json().catch(() => null);
+    if (body?.detail?.error === "axis_calibration_failed") {
+      throw new AxisCalibrationFailedError(body.detail.message);
+    }
+    throw new Error(body?.detail?.message ?? "Upload failed");
+  }
+  const body = await response.json();
+  return {
+    chartType: body.chart_type,
+    series: body.series.map((s: any) => ({
+      name: s.name,
+      colorBgr: s.color_bgr,
+      points: s.points,
+      censoringMarks: s.censoring_marks,
+    })),
+    overlayImageBase64: body.overlay_image_base64,
+    xAxisCalibratedFromOcr: body.x_axis_calibrated_from_ocr,
+    yAxisCalibratedFromOcr: body.y_axis_calibrated_from_ocr,
+    xReferencePoints: body.x_reference_points,
+    yReferencePoints: body.y_reference_points,
+  };
+}
+```
+
+- [ ] **Step 8: Add the manual-entry fallback form to the upload page**
+
+Replace `frontend/src/pages/Upload.tsx` with:
+```tsx
+import { ChangeEvent, DragEvent, FormEvent, useState } from "react";
+import { useNavigate } from "react-router-dom";
+import { AxisCalibrationFailedError, uploadChart } from "../api";
+import type { UploadResult } from "../types";
+
+interface UploadPageProps {
+  onUploaded: (result: UploadResult, imageDataUrl: string) => void;
+}
+
+export function Upload({ onUploaded }: UploadPageProps) {
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [needsManualAxis, setNeedsManualAxis] = useState(false);
+  const [pendingFile, setPendingFile] = useState<File | null>(null);
+  const [manualRange, setManualRange] = useState({ xMin: "0", xMax: "1", yMin: "0", yMax: "1" });
+  const navigate = useNavigate();
+
+  async function processFile(file: File, useManualRange: boolean) {
+    setError(null);
+    setLoading(true);
+    try {
+      const reader = new FileReader();
+      const imageDataUrlPromise = new Promise<string>((resolve) => {
+        reader.onload = () => resolve(reader.result as string);
+      });
+      reader.readAsDataURL(file);
+
+      const result = await uploadChart(
+        file,
+        useManualRange
+          ? {
+              xMin: Number(manualRange.xMin),
+              xMax: Number(manualRange.xMax),
+              yMin: Number(manualRange.yMin),
+              yMax: Number(manualRange.yMax),
+            }
+          : undefined,
+      );
+      onUploaded(result, await imageDataUrlPromise);
+      navigate("/review");
+    } catch (err) {
+      if (err instanceof AxisCalibrationFailedError) {
+        setPendingFile(file);
+        setNeedsManualAxis(true);
+        setError(err.message);
+      } else {
+        setError("Couldn't process this image. Try a clearer chart image, or a different file.");
+      }
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  function handleDrop(event: DragEvent<HTMLDivElement>) {
+    event.preventDefault();
+    const file = event.dataTransfer.files[0];
+    if (file) processFile(file, false);
+  }
+
+  function handleFileInput(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    if (file) processFile(file, false);
+  }
+
+  function handleManualSubmit(event: FormEvent) {
+    event.preventDefault();
+    if (pendingFile) processFile(pendingFile, true);
+  }
+
+  if (needsManualAxis) {
+    return (
+      <form onSubmit={handleManualSubmit} style={{ maxWidth: 320, margin: "80px auto" }}>
+        <h2>Couldn't read axis labels automatically</h2>
+        <p>{error}</p>
+        <label>X min <input value={manualRange.xMin} onChange={(e) => setManualRange({ ...manualRange, xMin: e.target.value })} /></label>
+        <label>X max <input value={manualRange.xMax} onChange={(e) => setManualRange({ ...manualRange, xMax: e.target.value })} /></label>
+        <label>Y min <input value={manualRange.yMin} onChange={(e) => setManualRange({ ...manualRange, yMin: e.target.value })} /></label>
+        <label>Y max <input value={manualRange.yMax} onChange={(e) => setManualRange({ ...manualRange, yMax: e.target.value })} /></label>
+        <button type="submit" disabled={loading}>{loading ? "Processing..." : "Continue"}</button>
+      </form>
+    );
+  }
+
+  return (
+    <div style={{ maxWidth: 480, margin: "80px auto", textAlign: "center" }}>
+      <h1>Upload a chart image</h1>
+      <div
+        onDrop={handleDrop}
+        onDragOver={(event) => event.preventDefault()}
+        style={{ border: "2px dashed #999", borderRadius: 8, padding: 48, cursor: "pointer" }}
+      >
+        {loading ? (
+          <p>Processing...</p>
+        ) : (
+          <>
+            <p>Drag and drop a JPEG or PNG chart image here, or</p>
+            <input type="file" accept="image/jpeg,image/png" onChange={handleFileInput} />
+          </>
+        )}
+      </div>
+      {error && !needsManualAxis && <p style={{ color: "red" }}>{error}</p>}
+    </div>
+  );
+}
+```
+
+- [ ] **Step 9: Verify frontend compiles and backend tests still pass**
+
+Run: `cd frontend && npx tsc --noEmit`
+Run: `cd backend && pytest -v`
+Expected: both PASS.
+
+- [ ] **Step 10: Commit**
+
+```bash
+git add backend/app/pipeline/pipeline.py backend/app/main.py backend/tests/test_pipeline.py backend/tests/test_api.py frontend/src/api.ts frontend/src/pages/Upload.tsx
+git commit -m "feat: wire up manual axis-range fallback when OCR can't read tick labels"
+```
