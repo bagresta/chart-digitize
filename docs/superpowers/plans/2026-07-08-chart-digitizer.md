@@ -1743,3 +1743,445 @@ git commit -m "feat: orchestrate full extraction pipeline with manual axis overr
 ```
 
 ---
+
+## Task 14: Password auth with signed session cookie
+
+**Files:**
+- Create: `backend/app/auth.py`
+- Test: `backend/tests/test_auth.py`
+
+- [ ] **Step 1: Write the failing test**
+
+`backend/tests/test_auth.py`:
+```python
+import os
+
+os.environ["APP_PASSWORD"] = "test-password-123"
+os.environ["SESSION_SECRET_KEY"] = "test-secret-key"
+
+from app.auth import create_session_token, verify_password, verify_session_token
+
+
+def test_verify_password_accepts_correct_password():
+    assert verify_password("test-password-123") is True
+
+
+def test_verify_password_rejects_wrong_password():
+    assert verify_password("wrong") is False
+
+
+def test_session_token_round_trips():
+    token = create_session_token()
+    assert verify_session_token(token) is True
+
+
+def test_session_token_rejects_tampered_value():
+    token = create_session_token()
+    tampered = token[:-1] + ("a" if token[-1] != "a" else "b")
+    assert verify_session_token(tampered) is False
+
+
+def test_session_token_rejects_garbage():
+    assert verify_session_token("not-a-real-token") is False
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `cd backend && pytest tests/test_auth.py -v`
+Expected: FAIL — `ModuleNotFoundError: No module named 'app.auth'`
+
+- [ ] **Step 3: Implement auth**
+
+`backend/app/auth.py`:
+```python
+"""Single shared-password auth: on successful login, issues a signed,
+timestamped session token (no server-side session storage needed since the
+app is stateless). The token is opaque to the client and expires after 7
+days."""
+import os
+
+from itsdangerous import BadSignature, SignatureExpired, URLSafeTimedSerializer
+
+_SESSION_MAX_AGE_SECONDS = 7 * 24 * 60 * 60
+_SESSION_PAYLOAD = "authenticated"
+
+
+def _serializer() -> URLSafeTimedSerializer:
+    secret_key = os.environ["SESSION_SECRET_KEY"]
+    return URLSafeTimedSerializer(secret_key)
+
+
+def verify_password(password: str) -> bool:
+    return password == os.environ["APP_PASSWORD"]
+
+
+def create_session_token() -> str:
+    return _serializer().dumps(_SESSION_PAYLOAD)
+
+
+def verify_session_token(token: str) -> bool:
+    try:
+        payload = _serializer().loads(token, max_age=_SESSION_MAX_AGE_SECONDS)
+    except (BadSignature, SignatureExpired):
+        return False
+    return payload == _SESSION_PAYLOAD
+```
+
+- [ ] **Step 4: Run test to verify it passes**
+
+Run: `cd backend && pytest tests/test_auth.py -v`
+Expected: PASS
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add backend/app/auth.py backend/tests/test_auth.py
+git commit -m "feat: add password auth with signed session token"
+```
+
+---
+
+## Task 15: Login and upload API endpoints
+
+**Files:**
+- Modify: `backend/app/main.py`
+- Test: `backend/tests/test_api.py`
+
+- [ ] **Step 1: Write the failing test**
+
+`backend/tests/test_api.py`:
+```python
+import os
+
+os.environ["APP_PASSWORD"] = "test-password-123"
+os.environ["SESSION_SECRET_KEY"] = "test-secret-key"
+
+import cv2
+from fastapi.testclient import TestClient
+
+from app.main import app
+from tests.fixtures import make_line_chart
+
+client = TestClient(app)
+
+
+def _login_client():
+    response = client.post("/api/login", json={"password": "test-password-123"})
+    assert response.status_code == 200
+    assert "session" in response.cookies
+    return response.cookies
+
+
+def test_login_with_correct_password_sets_session_cookie():
+    _login_client()
+
+
+def test_login_with_wrong_password_returns_401():
+    response = client.post("/api/login", json={"password": "wrong"})
+    assert response.status_code == 401
+
+
+def test_upload_without_session_returns_401():
+    image, _ = make_line_chart()
+    success, buf = cv2.imencode(".png", image)
+    response = client.post("/api/upload", files={"file": ("chart.png", buf.tobytes(), "image/png")})
+    assert response.status_code == 401
+
+
+def test_upload_with_session_returns_extracted_series():
+    cookies = _login_client()
+    image, _ = make_line_chart()
+    success, buf = cv2.imencode(".png", image)
+
+    response = client.post(
+        "/api/upload",
+        files={"file": ("chart.png", buf.tobytes(), "image/png")},
+        cookies=cookies,
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["chart_type"] == "line"
+    assert len(body["series"]) == 1
+    assert len(body["series"][0]["points"]) > 5
+    assert "overlay_image_base64" in body
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `cd backend && pytest tests/test_api.py -v`
+Expected: FAIL — 404s, since `/api/login` and `/api/upload` don't exist yet.
+
+- [ ] **Step 3: Implement the endpoints**
+
+`backend/app/models.py`:
+```python
+from pydantic import BaseModel
+
+
+class LoginRequest(BaseModel):
+    password: str
+
+
+class SeriesResponse(BaseModel):
+    name: str
+    color_bgr: tuple[int, int, int]
+    points: list[tuple[float, float]]
+    censoring_marks: list[tuple[float, float]]
+
+
+class UploadResponse(BaseModel):
+    chart_type: str
+    series: list[SeriesResponse]
+    overlay_image_base64: str
+    x_axis_calibrated_from_ocr: bool
+    y_axis_calibrated_from_ocr: bool
+```
+
+Replace `backend/app/main.py` with:
+```python
+import base64
+
+from fastapi import Cookie, FastAPI, HTTPException, Response, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
+
+from app.auth import create_session_token, verify_password, verify_session_token
+from app.models import LoginRequest, SeriesResponse, UploadResponse
+from app.pipeline.pipeline import run_pipeline
+
+app = FastAPI(title="Chart Digitizer API")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+@app.get("/api/health")
+def health_check():
+    return {"status": "ok"}
+
+
+@app.post("/api/login")
+def login(request: LoginRequest, response: Response):
+    if not verify_password(request.password):
+        raise HTTPException(status_code=401, detail="Incorrect password")
+
+    token = create_session_token()
+    response.set_cookie("session", token, httponly=True, samesite="none", secure=True, max_age=7 * 24 * 60 * 60)
+    return {"status": "ok"}
+
+
+def _require_session(session: str | None) -> None:
+    if session is None or not verify_session_token(session):
+        raise HTTPException(status_code=401, detail="Not authenticated")
+
+
+@app.post("/api/upload", response_model=UploadResponse)
+async def upload(file: UploadFile, session: str | None = Cookie(default=None)):
+    _require_session(session)
+
+    image_bytes = await file.read()
+    try:
+        result = run_pipeline(image_bytes)
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error))
+
+    return UploadResponse(
+        chart_type=result.chart_type,
+        series=[
+            SeriesResponse(
+                name=s.name, color_bgr=s.color_bgr, points=s.points, censoring_marks=s.censoring_marks
+            )
+            for s in result.series
+        ],
+        overlay_image_base64=base64.b64encode(result.overlay_image_png).decode("ascii"),
+        x_axis_calibrated_from_ocr=result.x_axis_calibrated_from_ocr,
+        y_axis_calibrated_from_ocr=result.y_axis_calibrated_from_ocr,
+    )
+```
+
+- [ ] **Step 4: Run test to verify it passes**
+
+Run: `cd backend && pytest tests/test_api.py -v`
+Expected: PASS
+
+- [ ] **Step 5: Run the full backend test suite**
+
+Run: `cd backend && pytest -v`
+Expected: all tests PASS.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add backend/app/main.py backend/app/models.py backend/tests/test_api.py
+git commit -m "feat: add login and upload API endpoints"
+```
+
+---
+
+## Task 16: CSV/Excel export endpoint
+
+Takes the (possibly user-corrected) series data back from the frontend and returns a downloadable file — export happens from whatever the user has on screen after edits, not by re-running the pipeline.
+
+**Files:**
+- Create: `backend/app/export.py`
+- Modify: `backend/app/main.py`
+- Test: `backend/tests/test_export.py`
+
+- [ ] **Step 1: Write the failing test**
+
+`backend/tests/test_export.py`:
+```python
+import io
+
+import openpyxl
+
+from app.export import series_to_csv, series_to_excel
+
+
+def test_series_to_csv_includes_series_column_and_all_points():
+    series = [
+        {"name": "Arm A", "points": [(0.0, 1.0), (2.0, 0.95)]},
+        {"name": "Arm B", "points": [(0.0, 1.0), (2.0, 0.90)]},
+    ]
+
+    csv_text = series_to_csv(series)
+
+    lines = csv_text.strip().splitlines()
+    assert lines[0] == "series,x,y"
+    assert "Arm A,0.0,1.0" in csv_text
+    assert "Arm B,2.0,0.9" in csv_text
+    assert len(lines) == 5  # header + 4 data rows
+
+
+def test_series_to_excel_produces_readable_workbook():
+    series = [{"name": "Series A", "points": [(1.0, 13.0), (5.0, 45.0)]}]
+
+    excel_bytes = series_to_excel(series)
+
+    workbook = openpyxl.load_workbook(io.BytesIO(excel_bytes))
+    sheet = workbook.active
+    rows = list(sheet.iter_rows(values_only=True))
+    assert rows[0] == ("series", "x", "y")
+    assert rows[1] == ("Series A", 1.0, 13.0)
+    assert rows[2] == ("Series A", 5.0, 45.0)
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `cd backend && pytest tests/test_export.py -v`
+Expected: FAIL — `ModuleNotFoundError: No module named 'app.export'`
+
+- [ ] **Step 3: Implement export**
+
+`backend/app/export.py`:
+```python
+"""Converts corrected series data (as sent back from the frontend after
+review/editing) into downloadable CSV or Excel files."""
+import io
+
+import openpyxl
+
+
+def series_to_csv(series: list[dict]) -> str:
+    lines = ["series,x,y"]
+    for s in series:
+        for x, y in s["points"]:
+            lines.append(f"{s['name']},{x},{y}")
+    return "\n".join(lines) + "\n"
+
+
+def series_to_excel(series: list[dict]) -> bytes:
+    workbook = openpyxl.Workbook()
+    sheet = workbook.active
+    sheet.append(["series", "x", "y"])
+    for s in series:
+        for x, y in s["points"]:
+            sheet.append([s["name"], x, y])
+
+    buffer = io.BytesIO()
+    workbook.save(buffer)
+    return buffer.getvalue()
+```
+
+- [ ] **Step 4: Run test to verify it passes**
+
+Run: `cd backend && pytest tests/test_export.py -v`
+Expected: PASS
+
+- [ ] **Step 5: Add the export endpoints to the API**
+
+Add to `backend/app/models.py`:
+```python
+class SeriesInput(BaseModel):
+    name: str
+    points: list[tuple[float, float]]
+
+
+class ExportRequest(BaseModel):
+    series: list[SeriesInput]
+```
+
+Add to `backend/app/main.py` (below the existing imports, add `from fastapi.responses import Response as FileResponse` is unnecessary — reuse `Response` already imported; add these routes after `upload`):
+```python
+from app.export import series_to_csv, series_to_excel
+from app.models import ExportRequest
+
+
+@app.post("/api/export/csv")
+def export_csv(request: ExportRequest, session: str | None = Cookie(default=None)):
+    _require_session(session)
+    csv_text = series_to_csv([s.model_dump() for s in request.series])
+    return Response(
+        content=csv_text,
+        media_type="text/csv",
+        headers={"Content-Disposition": "attachment; filename=chart_data.csv"},
+    )
+
+
+@app.post("/api/export/excel")
+def export_excel(request: ExportRequest, session: str | None = Cookie(default=None)):
+    _require_session(session)
+    excel_bytes = series_to_excel([s.model_dump() for s in request.series])
+    return Response(
+        content=excel_bytes,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": "attachment; filename=chart_data.xlsx"},
+    )
+```
+
+- [ ] **Step 6: Write and run an API-level test for both export routes**
+
+Add to `backend/tests/test_api.py`:
+```python
+def test_export_csv_requires_session():
+    response = client.post("/api/export/csv", json={"series": []})
+    assert response.status_code == 401
+
+
+def test_export_csv_returns_file():
+    cookies = _login_client()
+    response = client.post(
+        "/api/export/csv",
+        json={"series": [{"name": "Series A", "points": [[1.0, 2.0]]}]},
+        cookies=cookies,
+    )
+    assert response.status_code == 200
+    assert "series,x,y" in response.text
+```
+
+Run: `cd backend && pytest tests/test_api.py -v`
+Expected: PASS
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add backend/app/export.py backend/app/main.py backend/app/models.py backend/tests/test_export.py backend/tests/test_api.py
+git commit -m "feat: add CSV/Excel export endpoints"
+```
+
+---
