@@ -461,3 +461,271 @@ git commit -m "feat: detect plot box and axis tick pixel positions"
 ```
 
 ---
+
+## Task 4: OCR of axis tick labels and titles
+
+**Prerequisite:** the `tesseract` binary must be installed locally to run these tests (`choco install tesseract` on Windows, or `apt-get install tesseract-ocr` on Linux/CI). This is separate from the `pytesseract` pip package, which is just a wrapper.
+
+**Files:**
+- Create: `backend/app/pipeline/ocr.py`
+- Test: `backend/tests/test_ocr.py`
+
+- [ ] **Step 1: Write the failing test**
+
+`backend/tests/test_ocr.py`:
+```python
+from app.pipeline.geometry import detect_plot_box, detect_tick_positions
+from app.pipeline.ocr import read_axis_tick_labels
+from tests.fixtures import make_line_chart
+
+
+def test_read_axis_tick_labels_reads_numeric_y_values():
+    image, _ = make_line_chart()
+    box = detect_plot_box(image)
+    y_ticks = detect_tick_positions(image, box, axis="y")
+
+    labels = read_axis_tick_labels(image, box, y_ticks, axis="y")
+
+    assert len(labels) == len(y_ticks)
+    numeric_values = [label.value for label in labels if label.value is not None]
+    # y range is 0..100 in steps of 20 by default matplotlib behavior;
+    # require most ticks to be read correctly (OCR isn't perfect)
+    assert len(numeric_values) >= len(y_ticks) - 1
+    assert numeric_values == sorted(numeric_values, reverse=True)  # top-to-bottom => descending
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `cd backend && pytest tests/test_ocr.py -v`
+Expected: FAIL — `ModuleNotFoundError: No module named 'app.pipeline.ocr'`
+
+- [ ] **Step 3: Implement OCR reading**
+
+`backend/app/pipeline/ocr.py`:
+```python
+"""Reads axis tick label text/numbers, axis titles, and legend text from a
+chart image using Tesseract OCR. Each region is cropped and upscaled before
+OCR to maximize accuracy on small chart label text."""
+import re
+from dataclasses import dataclass
+
+import cv2
+import numpy as np
+import pytesseract
+
+from app.pipeline.geometry import PlotBox
+
+_UPSCALE_FACTOR = 3
+_NUMBER_PATTERN = re.compile(r"-?\d+\.?\d*")
+
+
+@dataclass
+class TickLabel:
+    pixel_position: int
+    text: str
+    value: float | None
+
+
+def _preprocess_for_ocr(crop: np.ndarray) -> np.ndarray:
+    gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+    upscaled = cv2.resize(
+        gray, None, fx=_UPSCALE_FACTOR, fy=_UPSCALE_FACTOR, interpolation=cv2.INTER_CUBIC
+    )
+    _, binary = cv2.threshold(upscaled, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    return binary
+
+
+def _parse_number(text: str) -> float | None:
+    text = text.strip().replace(",", "")
+    match = _NUMBER_PATTERN.search(text)
+    if match is None:
+        return None
+    try:
+        return float(match.group())
+    except ValueError:
+        return None
+
+
+def read_axis_tick_labels(
+    image: np.ndarray, box: PlotBox, tick_positions: list[int], axis: str
+) -> list[TickLabel]:
+    labels: list[TickLabel] = []
+    h, w = image.shape[:2]
+
+    for pos in tick_positions:
+        if axis == "x":
+            crop = image[box.bottom + 5: min(h, box.bottom + 35), max(0, pos - 30): pos + 30]
+            config = "--psm 7"
+        elif axis == "y":
+            crop = image[max(0, pos - 12): pos + 12, max(0, box.left - 60): max(0, box.left - 5)]
+            config = "--psm 7"
+        else:
+            raise ValueError(f"Unknown axis: {axis}")
+
+        if crop.size == 0:
+            labels.append(TickLabel(pixel_position=pos, text="", value=None))
+            continue
+
+        processed = _preprocess_for_ocr(crop)
+        text = pytesseract.image_to_string(processed, config=config).strip()
+        labels.append(TickLabel(pixel_position=pos, text=text, value=_parse_number(text)))
+
+    return labels
+
+
+def read_axis_title(image: np.ndarray, box: PlotBox, axis: str) -> str:
+    h, w = image.shape[:2]
+    if axis == "x":
+        crop = image[min(h, box.bottom + 35): min(h, box.bottom + 65), box.left:box.right]
+        processed = _preprocess_for_ocr(crop)
+        return pytesseract.image_to_string(processed, config="--psm 7").strip()
+    elif axis == "y":
+        crop = image[box.top:box.bottom, max(0, box.left - 95): max(0, box.left - 60)]
+        gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+        rotated = cv2.rotate(gray, cv2.ROTATE_90_COUNTERCLOCKWISE)
+        upscaled = cv2.resize(rotated, None, fx=_UPSCALE_FACTOR, fy=_UPSCALE_FACTOR, interpolation=cv2.INTER_CUBIC)
+        _, binary = cv2.threshold(upscaled, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        return pytesseract.image_to_string(binary, config="--psm 7").strip()
+    else:
+        raise ValueError(f"Unknown axis: {axis}")
+```
+
+- [ ] **Step 4: Run test to verify it passes**
+
+Run: `cd backend && pytest tests/test_ocr.py -v`
+Expected: PASS. OCR accuracy is sensitive to crop padding — if it fails, print `labels` to see the raw `text` Tesseract returned per tick and adjust the crop box size/offset in `read_axis_tick_labels`.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add backend/app/pipeline/ocr.py backend/tests/test_ocr.py
+git commit -m "feat: OCR axis tick labels and titles via Tesseract"
+```
+
+---
+
+## Task 5: Legend detection (series name + color)
+
+**Files:**
+- Create: `backend/app/pipeline/legend.py`
+- Test: `backend/tests/test_legend.py`
+
+- [ ] **Step 1: Write the failing test**
+
+`backend/tests/test_legend.py`:
+```python
+from app.pipeline.geometry import detect_plot_box
+from app.pipeline.legend import detect_legend_entries
+from tests.fixtures import make_km_chart
+
+
+def test_detect_legend_entries_finds_both_arms():
+    image, truth = make_km_chart()
+    box = detect_plot_box(image)
+
+    entries = detect_legend_entries(image, box)
+
+    assert len(entries) == 2
+    names = {entry.name.strip().lower() for entry in entries}
+    assert any("arm a" in name for name in names)
+    assert any("arm b" in name for name in names)
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `cd backend && pytest tests/test_legend.py -v`
+Expected: FAIL — `ModuleNotFoundError: No module named 'app.pipeline.legend'`
+
+- [ ] **Step 3: Implement legend detection**
+
+`backend/app/pipeline/legend.py`:
+```python
+"""Finds legend entries by looking for small solid-color swatches followed
+immediately (to the right) by a run of text, then OCRs that text. Legends in
+matplotlib-style figures are drawn as a tight box of swatch+label rows, so
+scanning for that pattern generalizes reasonably well beyond matplotlib too."""
+from dataclasses import dataclass
+
+import cv2
+import numpy as np
+import pytesseract
+
+from app.pipeline.geometry import PlotBox
+
+_MIN_SWATCH_AREA = 40
+_MAX_SWATCH_AREA = 2000
+_SWATCH_ASPECT_RANGE = (0.3, 3.0)  # roughly square-ish to wide rectangle
+
+
+@dataclass
+class LegendEntry:
+    name: str
+    color_bgr: tuple[int, int, int]
+    swatch_position: tuple[int, int]  # (x, y) center, for matching to curve colors
+
+
+def _is_near_grayscale(color_bgr: tuple[int, int, int], tolerance: int = 12) -> bool:
+    b, g, r = color_bgr
+    return max(b, g, r) - min(b, g, r) < tolerance
+
+
+def detect_legend_entries(image: np.ndarray, box: PlotBox) -> list[LegendEntry]:
+    # Search inside the plot box for small saturated-color rectangular blobs
+    # (candidate legend swatches) — legends are typically drawn inside or
+    # just outside the axes.
+    region = image[box.top:box.bottom, box.left:box.right]
+    hsv = cv2.cvtColor(region, cv2.COLOR_BGR2HSV)
+    saturated_mask = cv2.inRange(hsv, (0, 80, 60), (179, 255, 255))
+
+    contours, _ = cv2.findContours(saturated_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+    entries: list[LegendEntry] = []
+    for contour in contours:
+        x, y, w, h = cv2.boundingRect(contour)
+        area = w * h
+        if not (_MIN_SWATCH_AREA <= area <= _MAX_SWATCH_AREA):
+            continue
+        aspect = w / h if h else 0
+        if not (_SWATCH_ASPECT_RANGE[0] <= aspect <= _SWATCH_ASPECT_RANGE[1]):
+            continue
+
+        swatch_color = region[y + h // 2, x + w // 2].tolist()
+        if _is_near_grayscale(tuple(swatch_color)):
+            continue  # likely text or axis artifact, not a color swatch
+
+        text_crop = region[max(0, y - 4): y + h + 4, x + w + 3: min(region.shape[1], x + w + 150)]
+        if text_crop.size == 0:
+            continue
+
+        gray = cv2.cvtColor(text_crop, cv2.COLOR_BGR2GRAY)
+        upscaled = cv2.resize(gray, None, fx=3, fy=3, interpolation=cv2.INTER_CUBIC)
+        _, binary = cv2.threshold(upscaled, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        text = pytesseract.image_to_string(binary, config="--psm 7").strip()
+
+        if not text:
+            continue
+
+        entries.append(
+            LegendEntry(
+                name=text,
+                color_bgr=tuple(swatch_color),
+                swatch_position=(box.left + x + w // 2, box.top + y + h // 2),
+            )
+        )
+
+    return entries
+```
+
+- [ ] **Step 4: Run test to verify it passes**
+
+Run: `cd backend && pytest tests/test_legend.py -v`
+Expected: PASS. If swatches aren't found, print `saturated_mask` contour count and loosen `_MIN_SWATCH_AREA`/`_SWATCH_ASPECT_RANGE`; if OCR text is empty, widen the `text_crop` width.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add backend/app/pipeline/legend.py backend/tests/test_legend.py
+git commit -m "feat: detect legend entries (color swatch + series name)"
+```
+
+---
