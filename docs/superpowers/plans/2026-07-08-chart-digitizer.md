@@ -3246,13 +3246,9 @@ Expected: PASS
 
 - [ ] **Step 5: Accept manual override params on the upload endpoint and return a distinguishable error**
 
-Modify `backend/app/main.py` — update the `upload` route:
+Modify `backend/app/main.py` — add `from fastapi import Form` to the existing `fastapi` import line, add `from app.pipeline.pipeline import AxisCalibrationError` near the other `app.pipeline.pipeline` import, and replace the entire `upload` route (originally written in Task 15, Step 3) with:
+
 ```python
-from fastapi import Form
-
-from app.pipeline.pipeline import AxisCalibrationError
-
-
 @app.post("/api/upload", response_model=UploadResponse)
 async def upload(
     file: UploadFile,
@@ -3271,11 +3267,31 @@ async def upload(
     try:
         result = run_pipeline(image_bytes, manual_x_range=manual_x_range, manual_y_range=manual_y_range)
     except AxisCalibrationError:
-        raise HTTPException(status_code=422, detail={"error": "axis_calibration_failed", "message": "Couldn't read axis labels automatically. Enter axis min/max values to continue."})
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "error": "axis_calibration_failed",
+                "message": "Couldn't read axis labels automatically. Enter axis min/max values to continue.",
+            },
+        )
     except ValueError as error:
         raise HTTPException(status_code=422, detail={"error": "processing_failed", "message": str(error)})
+
+    return UploadResponse(
+        chart_type=result.chart_type,
+        series=[
+            SeriesResponse(
+                name=s.name, color_bgr=s.color_bgr, points=s.points, censoring_marks=s.censoring_marks
+            )
+            for s in result.series
+        ],
+        overlay_image_base64=base64.b64encode(result.overlay_image_png).decode("ascii"),
+        x_axis_calibrated_from_ocr=result.x_axis_calibrated_from_ocr,
+        y_axis_calibrated_from_ocr=result.y_axis_calibrated_from_ocr,
+        x_reference_points=result.x_reference_points,
+        y_reference_points=result.y_reference_points,
+    )
 ```
-(the rest of the function body — building and returning `UploadResponse` — stays as it was in Task 15).
 
 - [ ] **Step 6: Write and run the API test for the retry path**
 
