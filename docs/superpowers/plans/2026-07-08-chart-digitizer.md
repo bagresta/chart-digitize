@@ -1005,3 +1005,322 @@ git commit -m "feat: classify chart type (line/scatter/bar/Kaplan-Meier) from sh
 ```
 
 ---
+
+## Task 8: Series color-mask isolation
+
+Every extraction routine (line tracing, scatter centroids, bar extents) needs to first isolate "just this series' pixels" from the plot area. Build that once as a shared building block.
+
+**Files:**
+- Create: `backend/app/pipeline/curves.py`
+- Test: `backend/tests/test_curves_mask.py`
+
+- [ ] **Step 1: Write the failing test**
+
+`backend/tests/test_curves_mask.py`:
+```python
+import numpy as np
+
+from app.pipeline.curves import isolate_series_mask
+from app.pipeline.geometry import detect_plot_box
+from tests.fixtures import make_km_chart
+
+
+def test_isolate_series_mask_separates_red_and_green_arms():
+    image, _ = make_km_chart()
+    box = detect_plot_box(image)
+
+    red_mask = isolate_series_mask(image, box, target_color_bgr=(0, 0, 255), tolerance=40)
+    green_mask = isolate_series_mask(image, box, target_color_bgr=(0, 255, 0), tolerance=40)
+
+    assert red_mask.sum() > 0
+    assert green_mask.sum() > 0
+    # the two masks should be almost entirely disjoint
+    overlap = np.logical_and(red_mask > 0, green_mask > 0).sum()
+    assert overlap < min(red_mask.sum(), green_mask.sum()) * 0.05 / 255
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `cd backend && pytest tests/test_curves_mask.py -v`
+Expected: FAIL — `ModuleNotFoundError: No module named 'app.pipeline.curves'`
+
+- [ ] **Step 3: Implement color-mask isolation**
+
+`backend/app/pipeline/curves.py`:
+```python
+"""Isolates and traces individual series' pixels from the plot area, and
+extracts (x, y) data points for line/step, scatter, and bar chart types."""
+import cv2
+import numpy as np
+
+from app.pipeline.calibration import AxisCalibration
+from app.pipeline.geometry import PlotBox
+
+
+def isolate_series_mask(
+    image: np.ndarray, box: PlotBox, target_color_bgr: tuple[int, int, int], tolerance: int = 40
+) -> np.ndarray:
+    region = image[box.top:box.bottom, box.left:box.right]
+    target = np.array(target_color_bgr, dtype=np.int16)
+    diff = np.abs(region.astype(np.int16) - target).sum(axis=2)
+    mask = np.where(diff <= tolerance, 255, 0).astype(np.uint8)
+    return mask
+```
+
+- [ ] **Step 4: Run test to verify it passes**
+
+Run: `cd backend && pytest tests/test_curves_mask.py -v`
+Expected: PASS. If overlap is too high, lower `tolerance`; if a mask sum is 0, the fixture's line color didn't match `target_color_bgr` closely enough — print `region[region.shape[0]//2]` to sample actual pixel colors along the curve.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add backend/app/pipeline/curves.py backend/tests/test_curves_mask.py
+git commit -m "feat: isolate per-series pixel mask by target color"
+```
+
+---
+
+## Task 9: Line and Kaplan-Meier step-curve tracing
+
+**Files:**
+- Modify: `backend/app/pipeline/curves.py`
+- Test: `backend/tests/test_curves_line.py`
+
+- [ ] **Step 1: Write the failing test**
+
+`backend/tests/test_curves_line.py`:
+```python
+import pytest
+
+from app.pipeline.calibration import fit_axis_calibration
+from app.pipeline.curves import isolate_series_mask, trace_line_curve
+from app.pipeline.geometry import detect_plot_box, detect_tick_positions
+from app.pipeline.ocr import read_axis_tick_labels
+from tests.fixtures import make_km_chart, make_line_chart
+
+
+def _calibrate(image, box):
+    x_ticks = detect_tick_positions(image, box, axis="x")
+    y_ticks = detect_tick_positions(image, box, axis="y")
+    x_labels = read_axis_tick_labels(image, box, x_ticks, axis="x")
+    y_labels = read_axis_tick_labels(image, box, y_ticks, axis="y")
+    return (
+        fit_axis_calibration(x_labels, log_scale=False),
+        fit_axis_calibration(y_labels, log_scale=False),
+    )
+
+
+def test_trace_line_curve_recovers_known_line():
+    image, truth = make_line_chart()
+    box = detect_plot_box(image)
+    x_cal, y_cal = _calibrate(image, box)
+
+    mask = isolate_series_mask(image, box, target_color_bgr=(255, 0, 0), tolerance=60)  # blue
+    points = trace_line_curve(mask, box, x_cal, y_cal, step=False)
+
+    assert len(points) > 5
+    # y = 8x + 5 in the fixture; check a mid-range traced point is close
+    mid_points = [p for p in points if 4 <= p[0] <= 6]
+    assert mid_points
+    x, y = mid_points[len(mid_points) // 2]
+    assert y == pytest.approx(8 * x + 5, abs=5)
+
+
+def test_trace_line_curve_step_mode_recovers_km_curve():
+    image, truth = make_km_chart()
+    box = detect_plot_box(image)
+    x_cal, y_cal = _calibrate(image, box)
+
+    mask = isolate_series_mask(image, box, target_color_bgr=(0, 0, 255), tolerance=60)  # red
+    points = trace_line_curve(mask, box, x_cal, y_cal, step=True)
+
+    assert len(points) > 3
+    # survival should be non-increasing across a KM curve
+    y_values = [p[1] for p in points]
+    assert all(y_values[i] >= y_values[i + 1] - 0.05 for i in range(len(y_values) - 1))
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `cd backend && pytest tests/test_curves_line.py -v`
+Expected: FAIL — `ImportError: cannot import name 'trace_line_curve'`
+
+- [ ] **Step 3: Implement line/step tracing**
+
+Append to `backend/app/pipeline/curves.py`:
+```python
+def trace_line_curve(
+    mask: np.ndarray,
+    box: PlotBox,
+    x_calibration: AxisCalibration,
+    y_calibration: AxisCalibration,
+    step: bool,
+) -> list[tuple[float, float]]:
+    """For each pixel-column containing series pixels, takes the vertical
+    center (line mode) or, for step-function curves, keeps every distinct
+    flat run's y-level so vertical jumps are preserved as separate points."""
+    points_px: list[tuple[int, int]] = []
+
+    for col in range(mask.shape[1]):
+        rows = np.where(mask[:, col] > 0)[0]
+        if len(rows) == 0:
+            continue
+        if step:
+            # a step curve can have two y-levels in the same column at a
+            # jump; record the extremes rather than averaging them away
+            points_px.append((col, int(rows.min())))
+            if rows.max() != rows.min():
+                points_px.append((col, int(rows.max())))
+        else:
+            points_px.append((col, int(rows.mean())))
+
+    points_px.sort(key=lambda p: p[0])
+
+    points_data = [
+        (
+            x_calibration.pixel_to_value(box.left + col),
+            y_calibration.pixel_to_value(box.top + row),
+        )
+        for col, row in points_px
+    ]
+    return points_data
+```
+
+- [ ] **Step 4: Run test to verify it passes**
+
+Run: `cd backend && pytest tests/test_curves_line.py -v`
+Expected: PASS
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add backend/app/pipeline/curves.py backend/tests/test_curves_line.py
+git commit -m "feat: trace line and step-function (Kaplan-Meier) curves to data points"
+```
+
+---
+
+## Task 10: Scatter centroid and bar extent extraction
+
+**Files:**
+- Modify: `backend/app/pipeline/curves.py`
+- Test: `backend/tests/test_curves_scatter_bar.py`
+
+- [ ] **Step 1: Write the failing test**
+
+`backend/tests/test_curves_scatter_bar.py`:
+```python
+import pytest
+
+from app.pipeline.calibration import fit_axis_calibration
+from app.pipeline.curves import extract_bar_heights, extract_scatter_points, isolate_series_mask
+from app.pipeline.geometry import detect_plot_box, detect_tick_positions
+from app.pipeline.ocr import read_axis_tick_labels
+from tests.fixtures import make_bar_chart, make_scatter_chart
+
+
+def _calibrate(image, box):
+    x_ticks = detect_tick_positions(image, box, axis="x")
+    y_ticks = detect_tick_positions(image, box, axis="y")
+    x_labels = read_axis_tick_labels(image, box, x_ticks, axis="x")
+    y_labels = read_axis_tick_labels(image, box, y_ticks, axis="y")
+    return (
+        fit_axis_calibration(x_labels, log_scale=False),
+        fit_axis_calibration(y_labels, log_scale=False),
+    )
+
+
+def test_extract_scatter_points_recovers_approximate_count():
+    image, truth = make_scatter_chart()
+    box = detect_plot_box(image)
+    x_cal, y_cal = _calibrate(image, box)
+
+    mask = isolate_series_mask(image, box, target_color_bgr=(128, 0, 128), tolerance=70)  # purple
+    points = extract_scatter_points(mask, box, x_cal, y_cal)
+
+    assert len(points) == pytest.approx(len(truth["series"][0]["points"]), abs=3)
+
+
+def test_extract_bar_heights_recovers_known_heights():
+    image, truth = make_bar_chart()
+    box = detect_plot_box(image)
+    x_cal, y_cal = _calibrate(image, box)
+
+    mask = isolate_series_mask(image, box, target_color_bgr=(128, 128, 0), tolerance=70)  # teal
+    bars = extract_bar_heights(mask, box, x_cal, y_cal)
+
+    assert len(bars) == 4
+    heights = sorted(y for _, y in bars)
+    expected = sorted(y for _, y in truth["series"][0]["points"])
+    for actual, exp in zip(heights, expected):
+        assert actual == pytest.approx(exp, abs=3)
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `cd backend && pytest tests/test_curves_scatter_bar.py -v`
+Expected: FAIL — `ImportError: cannot import name 'extract_scatter_points'`
+
+- [ ] **Step 3: Implement scatter and bar extraction**
+
+Append to `backend/app/pipeline/curves.py`:
+```python
+def extract_scatter_points(
+    mask: np.ndarray, box: PlotBox, x_calibration: AxisCalibration, y_calibration: AxisCalibration
+) -> list[tuple[float, float]]:
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+    points_data = []
+    for contour in contours:
+        if cv2.contourArea(contour) < 3:
+            continue
+        moments = cv2.moments(contour)
+        if moments["m00"] == 0:
+            continue
+        cx = moments["m10"] / moments["m00"]
+        cy = moments["m01"] / moments["m00"]
+        points_data.append(
+            (
+                x_calibration.pixel_to_value(box.left + cx),
+                y_calibration.pixel_to_value(box.top + cy),
+            )
+        )
+    return points_data
+
+
+def extract_bar_heights(
+    mask: np.ndarray, box: PlotBox, x_calibration: AxisCalibration, y_calibration: AxisCalibration
+) -> list[tuple[float, float]]:
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+    bars = []
+    for contour in contours:
+        x, y, w, h = cv2.boundingRect(contour)
+        if w * h < mask.size * 0.005:
+            continue
+        center_x_px = box.left + x + w / 2
+        top_y_px = box.top + y  # top edge of the bar = its value
+        bars.append(
+            (
+                x_calibration.pixel_to_value(center_x_px),
+                y_calibration.pixel_to_value(top_y_px),
+            )
+        )
+    bars.sort(key=lambda p: p[0])
+    return bars
+```
+
+- [ ] **Step 4: Run test to verify it passes**
+
+Run: `cd backend && pytest tests/test_curves_scatter_bar.py -v`
+Expected: PASS. If bar count is wrong, adjacent bars may be merging in the mask — check the fixture's bar spacing vs. `tolerance` used in `isolate_series_mask`.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add backend/app/pipeline/curves.py backend/tests/test_curves_scatter_bar.py
+git commit -m "feat: extract scatter point centroids and bar heights"
+```
+
+---
