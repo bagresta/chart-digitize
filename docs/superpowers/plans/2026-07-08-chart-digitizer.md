@@ -1415,3 +1415,101 @@ git commit -m "feat: detect Kaplan-Meier censoring tick marks"
 ```
 
 ---
+
+## Task 12: Overlay image generation
+
+**Files:**
+- Create: `backend/app/pipeline/overlay.py`
+- Test: `backend/tests/test_overlay.py`
+
+- [ ] **Step 1: Write the failing test**
+
+`backend/tests/test_overlay.py`:
+```python
+import numpy as np
+
+from app.pipeline.calibration import fit_axis_calibration
+from app.pipeline.geometry import detect_plot_box, detect_tick_positions
+from app.pipeline.ocr import read_axis_tick_labels
+from app.pipeline.overlay import draw_overlay
+from tests.fixtures import make_line_chart
+
+
+def test_draw_overlay_returns_modified_image_same_shape():
+    image, _ = make_line_chart()
+    box = detect_plot_box(image)
+    x_ticks = detect_tick_positions(image, box, axis="x")
+    y_ticks = detect_tick_positions(image, box, axis="y")
+    x_cal = fit_axis_calibration(read_axis_tick_labels(image, box, x_ticks, axis="x"), log_scale=False)
+    y_cal = fit_axis_calibration(read_axis_tick_labels(image, box, y_ticks, axis="y"), log_scale=False)
+
+    series = [{"name": "Series A", "color_bgr": (255, 0, 0), "points": [(1.0, 13.0), (5.0, 45.0), (9.0, 77.0)]}]
+
+    overlay_image = draw_overlay(image, box, x_cal, y_cal, series)
+
+    assert overlay_image.shape == image.shape
+    # overlay must actually change some pixels (markers drawn), not be a no-op copy
+    assert not np.array_equal(overlay_image, image)
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `cd backend && pytest tests/test_overlay.py -v`
+Expected: FAIL — `ModuleNotFoundError: No module named 'app.pipeline.overlay'`
+
+- [ ] **Step 3: Implement overlay drawing**
+
+`backend/app/pipeline/overlay.py`:
+```python
+"""Draws detected data points back onto a copy of the original chart image,
+for the user to visually sanity-check auto-extraction accuracy."""
+import cv2
+import numpy as np
+
+from app.pipeline.calibration import AxisCalibration
+from app.pipeline.geometry import PlotBox
+
+_MARKER_RADIUS = 4
+_MARKER_COLOR_BGR = (0, 0, 0)  # black outline, drawn under a white fill for contrast on any series color
+_MARKER_OUTLINE_COLOR_BGR = (255, 255, 255)
+
+
+def _value_to_pixel(value: float, calibration: AxisCalibration, origin: int) -> int:
+    # invert calibration.pixel_to_value: value = slope*pixel + intercept (or slope*pixel+intercept in log space)
+    raw_value = np.log10(value) if calibration.log_scale else value
+    pixel = (raw_value - calibration.intercept) / calibration.slope
+    return int(round(pixel))
+
+
+def draw_overlay(
+    image: np.ndarray,
+    box: PlotBox,
+    x_calibration: AxisCalibration,
+    y_calibration: AxisCalibration,
+    series: list[dict],
+) -> np.ndarray:
+    overlay = image.copy()
+
+    for s in series:
+        for x_val, y_val in s["points"]:
+            px = _value_to_pixel(x_val, x_calibration, box.left)
+            py = _value_to_pixel(y_val, y_calibration, box.top)
+            cv2.circle(overlay, (px, py), _MARKER_RADIUS + 1, _MARKER_OUTLINE_COLOR_BGR, -1)
+            cv2.circle(overlay, (px, py), _MARKER_RADIUS, s.get("color_bgr", _MARKER_COLOR_BGR), -1)
+
+    return overlay
+```
+
+- [ ] **Step 4: Run test to verify it passes**
+
+Run: `cd backend && pytest tests/test_overlay.py -v`
+Expected: PASS
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add backend/app/pipeline/overlay.py backend/tests/test_overlay.py
+git commit -m "feat: draw detected points overlay onto original chart image"
+```
+
+---
