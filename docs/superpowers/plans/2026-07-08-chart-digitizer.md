@@ -1324,3 +1324,94 @@ git commit -m "feat: extract scatter point centroids and bar heights"
 ```
 
 ---
+
+## Task 11: Kaplan-Meier censoring tick detection
+
+**Files:**
+- Modify: `backend/app/pipeline/curves.py`
+- Test: `backend/tests/test_curves_censoring.py`
+
+- [ ] **Step 1: Write the failing test**
+
+`backend/tests/test_curves_censoring.py`:
+```python
+from app.pipeline.calibration import fit_axis_calibration
+from app.pipeline.curves import detect_censoring_marks, isolate_series_mask
+from app.pipeline.geometry import detect_plot_box, detect_tick_positions
+from app.pipeline.ocr import read_axis_tick_labels
+from tests.fixtures import make_km_chart
+
+
+def test_detect_censoring_marks_finds_plus_markers():
+    image, truth = make_km_chart()
+    box = detect_plot_box(image)
+    x_ticks = detect_tick_positions(image, box, axis="x")
+    y_ticks = detect_tick_positions(image, box, axis="y")
+    x_cal = fit_axis_calibration(read_axis_tick_labels(image, box, x_ticks, axis="x"), log_scale=False)
+    y_cal = fit_axis_calibration(read_axis_tick_labels(image, box, y_ticks, axis="y"), log_scale=False)
+
+    mask = isolate_series_mask(image, box, target_color_bgr=(0, 0, 255), tolerance=60)  # red arm
+    marks = detect_censoring_marks(mask, box, x_cal, y_cal)
+
+    # fixture has 2 censoring points on the red arm, at t=5 and t=9
+    assert len(marks) == 2
+    times = sorted(x for x, _ in marks)
+    assert times[0] == pytest.approx(5, abs=1)
+    assert times[1] == pytest.approx(9, abs=1)
+```
+
+Add `import pytest` at the top of the test file alongside the other imports.
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `cd backend && pytest tests/test_curves_censoring.py -v`
+Expected: FAIL — `ImportError: cannot import name 'detect_censoring_marks'`
+
+- [ ] **Step 3: Implement censoring mark detection**
+
+Append to `backend/app/pipeline/curves.py`:
+```python
+def detect_censoring_marks(
+    mask: np.ndarray, box: PlotBox, x_calibration: AxisCalibration, y_calibration: AxisCalibration
+) -> list[tuple[float, float]]:
+    """Censoring ticks (typically '+' or '|' markers) are small isolated
+    blobs disconnected from the main step-curve stroke, roughly
+    square/plus-shaped rather than long thin horizontal/vertical runs. This
+    finds small blobs whose bounding box is close to square and clearly
+    smaller than a full step-run segment."""
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+    marks = []
+    for contour in contours:
+        x, y, w, h = cv2.boundingRect(contour)
+        area = w * h
+        if area < 6 or area > 400:
+            continue
+        aspect = w / h if h else 0
+        if not (0.4 <= aspect <= 2.5):
+            continue  # skip long thin strokes (part of the main curve line)
+
+        center_x_px = box.left + x + w / 2
+        center_y_px = box.top + y + h / 2
+        marks.append(
+            (
+                x_calibration.pixel_to_value(center_x_px),
+                y_calibration.pixel_to_value(center_y_px),
+            )
+        )
+    return marks
+```
+
+- [ ] **Step 4: Run test to verify it passes**
+
+Run: `cd backend && pytest tests/test_curves_censoring.py -v`
+Expected: PASS. If marks are missed or the main curve stroke is picked up as a false mark, tune the `area`/`aspect` thresholds against this fixture's actual marker pixel size.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add backend/app/pipeline/curves.py backend/tests/test_curves_censoring.py
+git commit -m "feat: detect Kaplan-Meier censoring tick marks"
+```
+
+---
