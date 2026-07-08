@@ -17,6 +17,7 @@ _MAX_SWATCH_AREA = 3000
 # tolerate very wide/short rectangles in addition to square-ish ones.
 _SWATCH_ASPECT_RANGE = (0.1, 15.0)
 _TEXT_CROP_VPAD = 10
+_TEXT_CROP_WIDTH = 150
 _TEXT_UPSCALE_FACTOR = 10
 
 
@@ -38,6 +39,9 @@ def detect_legend_entries(image: np.ndarray, box: PlotBox) -> list[LegendEntry]:
     # just outside the axes.
     region = image[box.top:box.bottom, box.left:box.right]
     hsv = cv2.cvtColor(region, cv2.COLOR_BGR2HSV)
+    # Detect saturated colors (S>=80, V>=60) across all hues (H spans the
+    # full 0-179 OpenCV range) — this picks out vivid swatch colors while
+    # excluding grayscale/black axis and text pixels.
     saturated_mask = cv2.inRange(hsv, (0, 80, 60), (179, 255, 255))
 
     contours, _ = cv2.findContours(saturated_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -60,7 +64,7 @@ def detect_legend_entries(image: np.ndarray, box: PlotBox) -> list[LegendEntry]:
         # tall), so pad generously above/below to capture the full label
         # text height rather than just the swatch's own bounding box.
         text_crop = region[max(0, y - _TEXT_CROP_VPAD): y + h + _TEXT_CROP_VPAD,
-                            x + w + 3: min(region.shape[1], x + w + 150)]
+                            x + w + 3: min(region.shape[1], x + w + _TEXT_CROP_WIDTH)]
         if text_crop.size == 0:
             continue
 
@@ -71,7 +75,10 @@ def detect_legend_entries(image: np.ndarray, box: PlotBox) -> list[LegendEntry]:
         # (e.g. "Arm A" -> "ArmA"), losing the inter-word space.
         upscaled = cv2.resize(gray, None, fx=_TEXT_UPSCALE_FACTOR, fy=_TEXT_UPSCALE_FACTOR, interpolation=cv2.INTER_CUBIC)
         _, binary = cv2.threshold(upscaled, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-        text = pytesseract.image_to_string(binary, config="--psm 7").strip()
+        # Tesseract sometimes picks up the legend box's border as a stray
+        # trailing "|" glyph; strip it (and any space left in its place) so
+        # downstream consumers get an exact series name, not an OCR artifact.
+        text = pytesseract.image_to_string(binary, config="--psm 7").strip().rstrip("|").strip()
 
         if not text:
             continue

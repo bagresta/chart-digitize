@@ -10,6 +10,6 @@ def test_detect_legend_entries_finds_both_arms():
     entries = detect_legend_entries(image, box)
 
     assert len(entries) == 2
-    names = {entry.name.strip().lower() for entry in entries}
-    assert any("arm a" in name for name in names)
-    assert any("arm b" in name for name in names)
+    names = {entry.name.strip() for entry in entries}
+    assert "Arm A" in names
+    assert "Arm B" in names
