@@ -1,3 +1,4 @@
+import csv
 import io
 
 import openpyxl
@@ -53,3 +54,31 @@ def test_series_to_excel_escapes_formula_injection_in_series_name():
     rows = list(sheet.iter_rows(values_only=True))
     assert rows[1][0] == "'=cmd|'/c calc'!A1"
     assert not rows[1][0].startswith("=")
+
+
+def test_series_to_csv_quotes_series_name_containing_comma():
+    series = [{"name": "Arm A, high dose", "points": [(0.0, 1.0), (2.0, 3.0)]}]
+
+    csv_text = series_to_csv(series)
+
+    reader = csv.reader(io.StringIO(csv_text))
+    rows = list(reader)
+    assert rows[0] == ["series", "x", "y"]
+    # The comma in the name must NOT split into an extra field - the row
+    # must reconstruct as exactly 3 fields with the name intact.
+    assert rows[1] == ["Arm A, high dose", "0.0", "1.0"]
+    assert rows[2] == ["Arm A, high dose", "2.0", "3.0"]
+    assert len(rows[1]) == 3
+    assert len(rows[2]) == 3
+
+
+def test_series_to_csv_quotes_series_name_containing_double_quote():
+    series = [{"name": 'Arm "A"', "points": [(0.0, 1.0)]}]
+
+    csv_text = series_to_csv(series)
+
+    reader = csv.reader(io.StringIO(csv_text))
+    rows = list(reader)
+    assert rows[0] == ["series", "x", "y"]
+    assert rows[1] == ['Arm "A"', "0.0", "1.0"]
+    assert len(rows[1]) == 3

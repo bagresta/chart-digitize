@@ -1,5 +1,6 @@
 """Converts corrected series data (as sent back from the frontend after
 review/editing) into downloadable CSV or Excel files."""
+import csv
 import io
 
 import openpyxl
@@ -16,12 +17,17 @@ def _sanitize_for_spreadsheet(name: str) -> str:
 
 
 def series_to_csv(series: list[dict]) -> str:
-    lines = ["series,x,y"]
+    buffer = io.StringIO(newline="")
+    # \r\n is the CSV-spec default line terminator, but the pre-existing
+    # output (and its tests) used bare \n, so match that instead of
+    # introducing \r\n into every row.
+    writer = csv.writer(buffer, lineterminator="\n")
+    writer.writerow(["series", "x", "y"])
     for s in series:
         name = _sanitize_for_spreadsheet(s["name"])
         for x, y in s["points"]:
-            lines.append(f"{name},{x},{y}")
-    return "\n".join(lines) + "\n"
+            writer.writerow([name, x, y])
+    return buffer.getvalue()
 
 
 def series_to_excel(series: list[dict]) -> bytes:
