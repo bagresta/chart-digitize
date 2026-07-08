@@ -73,6 +73,22 @@ def test_upload_returns_structured_error_on_axis_calibration_failure(monkeypatch
     assert response.json()["detail"]["error"] == "axis_calibration_failed"
 
 
+def test_upload_rejects_file_exceeding_size_limit():
+    cookies = _login_client()
+    # Doesn't need to be a real image - the size check happens before
+    # image decoding is ever attempted.
+    oversized_bytes = b"\x00" * (10 * 1024 * 1024 + 1)
+
+    response = client.post(
+        "/api/upload",
+        files={"file": ("chart.png", oversized_bytes, "image/png")},
+        cookies=dict(cookies),
+    )
+
+    assert response.status_code == 413
+    assert response.json()["detail"]["error"] == "file_too_large"
+
+
 def test_upload_with_manual_axis_range_succeeds():
     cookies = _login_client()
     image, _ = make_line_chart()

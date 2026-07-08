@@ -10,6 +10,8 @@ from app.pipeline.pipeline import AxisCalibrationError, run_pipeline
 
 app = FastAPI(title="Chart Digitizer API")
 
+MAX_UPLOAD_BYTES = 10 * 1024 * 1024  # 10MB - generous for a chart screenshot/photo
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["https://chart-digitize.vercel.app"],
@@ -54,6 +56,15 @@ async def upload(
     manual_y_range = (manual_y_min, manual_y_max) if manual_y_min is not None and manual_y_max is not None else None
 
     image_bytes = await file.read()
+    if len(image_bytes) > MAX_UPLOAD_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail={
+                "error": "file_too_large",
+                "message": "Uploaded file exceeds the 10MB size limit.",
+            },
+        )
+
     try:
         result = run_pipeline(image_bytes, manual_x_range=manual_x_range, manual_y_range=manual_y_range)
     except AxisCalibrationError:
