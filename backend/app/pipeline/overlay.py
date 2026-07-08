@@ -11,7 +11,7 @@ _MARKER_COLOR_BGR = (0, 0, 0)  # black outline, drawn under a white fill for con
 _MARKER_OUTLINE_COLOR_BGR = (255, 255, 255)
 
 
-def _value_to_pixel(value: float, calibration: AxisCalibration, origin: int) -> int:
+def _value_to_pixel(value: float, calibration: AxisCalibration) -> int:
     # invert calibration.pixel_to_value: value = slope*pixel + intercept (or slope*pixel+intercept in log space)
     raw_value = np.log10(value) if calibration.log_scale else value
     pixel = (raw_value - calibration.intercept) / calibration.slope
@@ -29,8 +29,8 @@ def draw_overlay(
 
     for s in series:
         for x_val, y_val in s["points"]:
-            px = _value_to_pixel(x_val, x_calibration, box.left)
-            py = _value_to_pixel(y_val, y_calibration, box.top)
+            px = _value_to_pixel(x_val, x_calibration)
+            py = _value_to_pixel(y_val, y_calibration)
             cv2.circle(overlay, (px, py), _MARKER_RADIUS + 1, _MARKER_OUTLINE_COLOR_BGR, -1)
             cv2.circle(overlay, (px, py), _MARKER_RADIUS, s.get("color_bgr", _MARKER_COLOR_BGR), -1)
 
