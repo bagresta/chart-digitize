@@ -1,9 +1,17 @@
 import os
 
-os.environ["APP_PASSWORD"] = "test-password-123"
-os.environ["SESSION_SECRET_KEY"] = "test-secret-key"
+import pytest
+
+os.environ.setdefault("APP_PASSWORD", "test-password-123")
+os.environ.setdefault("SESSION_SECRET_KEY", "test-secret-key")
 
 from app.auth import create_session_token, verify_password, verify_session_token
+
+
+@pytest.fixture(autouse=True)
+def _env(monkeypatch):
+    monkeypatch.setenv("APP_PASSWORD", "test-password-123")
+    monkeypatch.setenv("SESSION_SECRET_KEY", "test-secret-key")
 
 
 def test_verify_password_accepts_correct_password():
