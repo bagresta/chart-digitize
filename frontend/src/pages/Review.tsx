@@ -71,7 +71,7 @@ export function Review({ uploadResult, imageDataUrl }: ReviewPageProps) {
           recalibrate that axis reference.
         </p>
         {series.map((s, i) => (
-          <button key={s.name} onClick={() => handleAddPoint(i)}>
+          <button key={i} onClick={() => handleAddPoint(i)}>
             + Add point to {s.name}
           </button>
         ))}
