@@ -150,3 +150,48 @@ def trace_line_curve(
         for col, row in points_px
     ]
     return points_data
+
+
+def extract_scatter_points(
+    mask: np.ndarray, box: PlotBox, x_calibration: AxisCalibration, y_calibration: AxisCalibration
+) -> list[tuple[float, float]]:
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+    points_data = []
+    for contour in contours:
+        if cv2.contourArea(contour) < 3:
+            continue
+        moments = cv2.moments(contour)
+        if moments["m00"] == 0:
+            continue
+        cx = moments["m10"] / moments["m00"]
+        cy = moments["m01"] / moments["m00"]
+        points_data.append(
+            (
+                x_calibration.pixel_to_value(box.left + cx),
+                y_calibration.pixel_to_value(box.top + cy),
+            )
+        )
+    return points_data
+
+
+def extract_bar_heights(
+    mask: np.ndarray, box: PlotBox, x_calibration: AxisCalibration, y_calibration: AxisCalibration
+) -> list[tuple[float, float]]:
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+    bars = []
+    for contour in contours:
+        x, y, w, h = cv2.boundingRect(contour)
+        if w * h < mask.size * 0.005:
+            continue
+        center_x_px = box.left + x + w / 2
+        top_y_px = box.top + y  # top edge of the bar = its value
+        bars.append(
+            (
+                x_calibration.pixel_to_value(center_x_px),
+                y_calibration.pixel_to_value(top_y_px),
+            )
+        )
+    bars.sort(key=lambda p: p[0])
+    return bars
