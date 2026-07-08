@@ -21,6 +21,12 @@ from app.pipeline.ocr import read_axis_tick_labels
 from app.pipeline.overlay import draw_overlay
 
 
+class AxisCalibrationError(ValueError):
+    """Raised when axis tick labels couldn't be read via OCR and no manual
+    override was supplied — the caller should offer the user a manual
+    min/max entry form and retry."""
+
+
 @dataclass
 class SeriesResult:
     name: str
@@ -67,7 +73,10 @@ def _build_axis_calibration(
 
     ticks = detect_tick_positions(image, box, axis=axis)
     labels = read_axis_tick_labels(image, box, ticks, axis=axis)
-    calibration = fit_axis_calibration(labels, log_scale=False)
+    try:
+        calibration = fit_axis_calibration(labels, log_scale=False)
+    except ValueError as error:
+        raise AxisCalibrationError(str(error)) from error
     reference_points = [
         (float(label.pixel_position), label.value) for label in labels if label.value is not None
     ]

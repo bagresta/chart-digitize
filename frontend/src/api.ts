@@ -14,9 +14,24 @@ export async function login(password: string): Promise<void> {
   }
 }
 
-export async function uploadChart(file: File): Promise<UploadResult> {
+export interface ManualAxisRange {
+  xMin: number;
+  xMax: number;
+  yMin: number;
+  yMax: number;
+}
+
+export class AxisCalibrationFailedError extends Error {}
+
+export async function uploadChart(file: File, manualRange?: ManualAxisRange): Promise<UploadResult> {
   const formData = new FormData();
   formData.append("file", file);
+  if (manualRange) {
+    formData.append("manual_x_min", String(manualRange.xMin));
+    formData.append("manual_x_max", String(manualRange.xMax));
+    formData.append("manual_y_min", String(manualRange.yMin));
+    formData.append("manual_y_max", String(manualRange.yMax));
+  }
 
   const response = await fetch(`${API_BASE}/api/upload`, {
     method: "POST",
@@ -24,7 +39,11 @@ export async function uploadChart(file: File): Promise<UploadResult> {
     body: formData,
   });
   if (!response.ok) {
-    throw new Error("Upload failed");
+    const body = await response.json().catch(() => null);
+    if (body?.detail?.error === "axis_calibration_failed") {
+      throw new AxisCalibrationFailedError(body.detail.message);
+    }
+    throw new Error(body?.detail?.message ?? "Upload failed");
   }
   const body = await response.json();
   return {

@@ -1,7 +1,7 @@
 import cv2
 import pytest
 
-from app.pipeline.pipeline import _dedupe_legend_entries_by_color, run_pipeline
+from app.pipeline.pipeline import AxisCalibrationError, _dedupe_legend_entries_by_color, run_pipeline
 from tests.fixtures import make_km_chart, make_line_chart, make_scatter_chart
 
 
@@ -46,6 +46,20 @@ def test_run_pipeline_with_manual_axis_override_skips_ocr_calibration():
 
     assert len(result.series) == 1
     assert len(result.series[0].points) > 5
+
+
+def test_run_pipeline_raises_axis_calibration_error_when_ocr_finds_no_numbers(monkeypatch):
+    from app.pipeline import pipeline as pipeline_module
+
+    def _unreadable_labels(*args, **kwargs):
+        from app.pipeline.ocr import TickLabel
+        return [TickLabel(pixel_position=10, text="???", value=None)]
+
+    monkeypatch.setattr(pipeline_module, "read_axis_tick_labels", _unreadable_labels)
+
+    image, _ = make_line_chart()
+    with pytest.raises(AxisCalibrationError):
+        run_pipeline(_encode(image))
 
 
 def test_run_pipeline_on_scatter_chart_produces_single_series():

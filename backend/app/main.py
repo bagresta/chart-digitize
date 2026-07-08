@@ -1,12 +1,12 @@
 import base64
 
-from fastapi import Cookie, FastAPI, HTTPException, Response, UploadFile
+from fastapi import Cookie, FastAPI, Form, HTTPException, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.auth import create_session_token, verify_password, verify_session_token
 from app.export import series_to_csv, series_to_excel
 from app.models import ExportRequest, LoginRequest, SeriesResponse, UploadResponse
-from app.pipeline.pipeline import run_pipeline
+from app.pipeline.pipeline import AxisCalibrationError, run_pipeline
 
 app = FastAPI(title="Chart Digitizer API")
 
@@ -40,14 +40,32 @@ def _require_session(session: str | None) -> None:
 
 
 @app.post("/api/upload", response_model=UploadResponse)
-async def upload(file: UploadFile, session: str | None = Cookie(default=None)):
+async def upload(
+    file: UploadFile,
+    session: str | None = Cookie(default=None),
+    manual_x_min: float | None = Form(default=None),
+    manual_x_max: float | None = Form(default=None),
+    manual_y_min: float | None = Form(default=None),
+    manual_y_max: float | None = Form(default=None),
+):
     _require_session(session)
+
+    manual_x_range = (manual_x_min, manual_x_max) if manual_x_min is not None and manual_x_max is not None else None
+    manual_y_range = (manual_y_min, manual_y_max) if manual_y_min is not None and manual_y_max is not None else None
 
     image_bytes = await file.read()
     try:
-        result = run_pipeline(image_bytes)
+        result = run_pipeline(image_bytes, manual_x_range=manual_x_range, manual_y_range=manual_y_range)
+    except AxisCalibrationError:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "error": "axis_calibration_failed",
+                "message": "Couldn't read axis labels automatically. Enter axis min/max values to continue.",
+            },
+        )
     except ValueError as error:
-        raise HTTPException(status_code=422, detail=str(error))
+        raise HTTPException(status_code=422, detail={"error": "processing_failed", "message": str(error)})
 
     return UploadResponse(
         chart_type=result.chart_type,

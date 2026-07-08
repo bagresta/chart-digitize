@@ -54,6 +54,38 @@ def test_upload_with_session_returns_extracted_series():
     assert "overlay_image_base64" in body
 
 
+def test_upload_returns_structured_error_on_axis_calibration_failure(monkeypatch):
+    import app.main as main_module
+
+    def _raise_calibration_error(*args, **kwargs):
+        from app.pipeline.pipeline import AxisCalibrationError
+        raise AxisCalibrationError("no readable ticks")
+
+    monkeypatch.setattr(main_module, "run_pipeline", _raise_calibration_error)
+
+    cookies = _login_client()
+    image, _ = make_line_chart()
+    success, buf = cv2.imencode(".png", image)
+    response = client.post(
+        "/api/upload", files={"file": ("chart.png", buf.tobytes(), "image/png")}, cookies=dict(cookies)
+    )
+    assert response.status_code == 422
+    assert response.json()["detail"]["error"] == "axis_calibration_failed"
+
+
+def test_upload_with_manual_axis_range_succeeds():
+    cookies = _login_client()
+    image, _ = make_line_chart()
+    success, buf = cv2.imencode(".png", image)
+    response = client.post(
+        "/api/upload",
+        files={"file": ("chart.png", buf.tobytes(), "image/png")},
+        data={"manual_x_min": "0", "manual_x_max": "10", "manual_y_min": "0", "manual_y_max": "100"},
+        cookies=dict(cookies),
+    )
+    assert response.status_code == 200
+
+
 def test_export_csv_requires_session():
     response = client.post("/api/export/csv", json={"series": []})
     assert response.status_code == 401
