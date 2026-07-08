@@ -30,6 +30,35 @@ def _cluster_row_runs(rows: np.ndarray, max_gap: int = 2) -> list[np.ndarray]:
     return [np.array(run) for run in runs]
 
 
+def _select_curve_run(runs: list[np.ndarray], last_row: int | None) -> np.ndarray:
+    """Given a column's row-runs (from `_cluster_row_runs`), picks the one
+    that most plausibly belongs to the traced curve rather than same-colored
+    clutter (a legend swatch, a censoring tick mark, etc.) sitting elsewhere
+    in the column.
+
+    This is the single run-selection rule shared by `trace_line_curve` (to
+    decide which run to walk next) and `detect_censoring_marks` (to decide
+    which pixels count as "curve" so everything else can be treated as
+    candidate clutter). Both callers must agree on this rule specifically —
+    not on the rest of either function's state machine — since
+    `detect_censoring_marks`'s correctness depends on knowing exactly which
+    pixels `trace_line_curve` would claim in each column.
+
+    If there's only one run, there's nothing to choose. Otherwise: the run
+    closest to `last_row` is kept, on the assumption the true curve moves
+    continuously column-to-column while unrelated clutter sits at a
+    disconnected row. The very first column with any data has no prior
+    point to anchor to, so it falls back to the run with the most pixels,
+    since a genuine line/step stroke is typically much thicker than a small
+    swatch or tick mark.
+    """
+    if len(runs) == 1:
+        return runs[0]
+    if last_row is None:
+        return max(runs, key=len)
+    return min(runs, key=lambda r: min(abs(int(r.min()) - last_row), abs(int(r.max()) - last_row)))
+
+
 def trace_line_curve(
     mask: np.ndarray,
     box: PlotBox,
@@ -53,13 +82,15 @@ def trace_line_curve(
     column-to-column while unrelated clutter sits at a disconnected row:
 
     1. Row-run selection: pixels in a column are first grouped into
-       contiguous runs (allowing a small gap for anti-aliasing). If a
-       column has more than one run, the run closest to `last_row` is kept
-       and the others (e.g. a legend swatch or censoring "+" mark sitting
-       far away) are discarded. The very first column with any data has no
-       prior point to anchor to, so it falls back to the run with the most
-       pixels, since a genuine line/step stroke is typically much thicker
-       than a small swatch or tick mark.
+       contiguous runs (allowing a small gap for anti-aliasing), then
+       `_select_curve_run` picks the one run that plausibly belongs to the
+       curve — the run closest to `last_row`, or (for the first column,
+       with no prior point to anchor to) the run with the most pixels. The
+       others (e.g. a legend swatch or censoring "+" mark sitting far away)
+       are discarded. This selection rule is shared with
+       `detect_censoring_marks`, which relies on it to know exactly which
+       pixels this function would claim as curve in each column — see that
+       function's docstring for the scope of that coupling.
     2. Riser/plateau de-duplication (step mode only): a step's vertical
        jump is drawn as a diagonal, anti-aliased edge that itself spans 2-3
        pixel columns, each contributing a run covering nearly the whole
@@ -91,13 +122,7 @@ def trace_line_curve(
             continue
 
         runs = _cluster_row_runs(rows)
-        if len(runs) > 1:
-            if last_row is None:
-                run = max(runs, key=len)
-            else:
-                run = min(runs, key=lambda r: min(abs(int(r.min()) - last_row), abs(int(r.max()) - last_row)))
-        else:
-            run = runs[0]
+        run = _select_curve_run(runs, last_row)
 
         if step:
             # a step curve can have two y-levels in the same column at a
@@ -193,17 +218,26 @@ def detect_censoring_marks(
     few blank rows between it and the curve) survives as an independent
     contour. Relying on that coincidence would make detection fragile.
 
-    Instead, this reuses the same per-column row-run continuity logic that
-    `trace_line_curve` uses to follow the curve (via `_cluster_row_runs`),
-    tracks which run in each column is "the curve" (closest to the
-    previous column's chosen run, precisely mirroring `trace_line_curve`'s
-    own selection so both functions agree on what counts as curve), and
-    paints only those chosen runs into a `curve_mask`. Subtracting
-    `curve_mask` from the full series mask leaves behind only the material
-    the curve tracer *didn't* claim: censoring ticks, legend swatches, and
-    similar same-colored clutter — even where a mark was touching the curve,
-    since only the specific run pixels the tracer selected are removed, not
-    the whole connected component.
+    Instead, this reuses `_select_curve_run` — the same per-column row-run
+    selection rule `trace_line_curve` uses to decide which run in a column
+    is "the curve" — and paints only those chosen runs into a `curve_mask`.
+    Subtracting `curve_mask` from the full series mask leaves behind only
+    the material the curve tracer *didn't* claim: censoring ticks, legend
+    swatches, and similar same-colored clutter — even where a mark was
+    touching the curve, since only the specific run pixels the tracer
+    selected are removed, not the whole connected component.
+
+    Note this mirrors `trace_line_curve` only in that one specific
+    run-selection rule (which run in a column counts as "curve"), not in
+    the rest of that function's state machine. `trace_line_curve`'s
+    step-mode branch additionally tracks a `(top, bottom)` span
+    (`last_run`) with separate riser/plateau de-duplication logic to decide
+    *which points to emit*; none of that applies here, since this function
+    only needs to know which pixels are curve, not which distinct data
+    points they represent. Because both functions call the same
+    `_select_curve_run` helper for the run-selection step, they can't
+    silently drift apart on that specific rule even if one of them changes
+    later — but that's the only piece of logic they share.
 
     A censoring "+" mark's own two strokes (horizontal and vertical) are
     thin and can still land in adjacent-but-not-touching row-run fragments
@@ -235,13 +269,7 @@ def detect_censoring_marks(
         if len(rows) == 0:
             continue
         runs = _cluster_row_runs(rows)
-        if len(runs) > 1:
-            if last_row is None:
-                run = max(runs, key=len)
-            else:
-                run = min(runs, key=lambda r: min(abs(int(r.min()) - last_row), abs(int(r.max()) - last_row)))
-        else:
-            run = runs[0]
+        run = _select_curve_run(runs, last_row)
         curve_mask[run.min():run.max() + 1, col] = 255
         last_row = int(run.mean())
 
