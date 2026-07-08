@@ -1,5 +1,5 @@
 from app.pipeline.geometry import detect_plot_box, detect_tick_positions
-from app.pipeline.ocr import read_axis_tick_labels
+from app.pipeline.ocr import read_axis_tick_labels, read_axis_title
 from tests.fixtures import make_line_chart
 
 
@@ -16,3 +16,12 @@ def test_read_axis_tick_labels_reads_numeric_y_values():
     # require most ticks to be read correctly (OCR isn't perfect)
     assert len(numeric_values) >= len(y_ticks) - 1
     assert numeric_values == sorted(numeric_values, reverse=True)  # top-to-bottom => descending
+
+
+def test_read_axis_title_extracts_string():
+    image, _ = make_line_chart()
+    box = detect_plot_box(image)
+    x_title = read_axis_title(image, box, axis="x")
+    y_title = read_axis_title(image, box, axis="y")
+    assert "time" in x_title.lower() or "month" in x_title.lower()
+    assert "value" in y_title.lower()

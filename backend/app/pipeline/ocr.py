@@ -72,14 +72,23 @@ def read_axis_title(image: np.ndarray, box: PlotBox, axis: str) -> str:
     h, w = image.shape[:2]
     if axis == "x":
         # the x title sits below the tick label row, near the bottom of the image
-        crop = image[min(h, box.bottom + 22): h, box.left:box.right]
+        crop = image[box.bottom + 22: h, box.left:box.right]
+        if crop.size == 0:
+            return ""
         processed = _preprocess_for_ocr(crop)
         return pytesseract.image_to_string(processed, config="--psm 7").strip()
     elif axis == "y":
         # the y title is the leftmost (rotated) text, further left than the
         # tick number labels which sit closer to the spine
         crop = image[box.top:box.bottom, 0: max(0, box.left - 35)]
+        if crop.size == 0:
+            return ""
         gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+        # matplotlib draws the rotated y-axis title text such that a naive
+        # counterclockwise rotation (the "obvious" inverse) comes out upside
+        # down/mirrored; a clockwise rotation is what reads correctly here.
+        # Empirically verified against the fixture image — do not "fix" this
+        # back to ROTATE_90_COUNTERCLOCKWISE.
         rotated = cv2.rotate(gray, cv2.ROTATE_90_CLOCKWISE)
         upscaled = cv2.resize(rotated, None, fx=_UPSCALE_FACTOR, fy=_UPSCALE_FACTOR, interpolation=cv2.INTER_CUBIC)
         _, binary = cv2.threshold(upscaled, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
