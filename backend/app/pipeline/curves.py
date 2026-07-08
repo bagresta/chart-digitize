@@ -175,6 +175,110 @@ def extract_scatter_points(
     return points_data
 
 
+def detect_censoring_marks(
+    mask: np.ndarray, box: PlotBox, x_calibration: AxisCalibration, y_calibration: AxisCalibration
+) -> list[tuple[float, float]]:
+    """Finds Kaplan-Meier censoring tick marks ('+' or '|' glyphs plotted in
+    the same color as the survival curve).
+
+    A naive `cv2.findContours(mask, cv2.RETR_EXTERNAL, ...)` over the whole
+    mask does *not* reliably isolate these as their own small contours: a
+    censoring mark is frequently plotted directly on the curve's stroke, so
+    its pixels are edge- or corner-adjacent to the curve's pixels and get
+    swallowed into the same external contour as the (much larger) curve
+    itself. On this project's own KM fixture, exactly that happens for the
+    censoring mark at t=9 — its vertical stroke sits immediately below the
+    curve's plateau row with no gap, so `findContours` merges mark and curve
+    into a single giant contour, while the t=5 mark (which happens to have a
+    few blank rows between it and the curve) survives as an independent
+    contour. Relying on that coincidence would make detection fragile.
+
+    Instead, this reuses the same per-column row-run continuity logic that
+    `trace_line_curve` uses to follow the curve (via `_cluster_row_runs`),
+    tracks which run in each column is "the curve" (closest to the
+    previous column's chosen run, precisely mirroring `trace_line_curve`'s
+    own selection so both functions agree on what counts as curve), and
+    paints only those chosen runs into a `curve_mask`. Subtracting
+    `curve_mask` from the full series mask leaves behind only the material
+    the curve tracer *didn't* claim: censoring ticks, legend swatches, and
+    similar same-colored clutter — even where a mark was touching the curve,
+    since only the specific run pixels the tracer selected are removed, not
+    the whole connected component.
+
+    A censoring "+" mark's own two strokes (horizontal and vertical) are
+    thin and can still land in adjacent-but-not-touching row-run fragments
+    after subtraction (e.g. the t=9 mark's horizontal bar and vertical stem
+    end up a few blank rows apart once the shared curve pixels are removed).
+    A small dilation re-merges same-mark fragments into one blob before
+    `findContours` runs, without merging distinct marks or the legend swatch
+    (verified against this fixture: a 7x7 kernel merges the t=9 mark's two
+    fragments into one blob while keeping it and the legend swatch
+    separate). Centroids are then computed from the *original* (undilated)
+    remainder pixels so the reported position isn't biased by the dilation.
+
+    Finally, blobs are filtered to plausible mark shapes: small, and close
+    to square (a "+" or "|" glyph) rather than the long thin strip typical
+    of a legend color swatch. A minimum *actual* (undilated) pixel count is
+    also required: the diagonal, anti-aliased edge of an ordinary step
+    riser can itself split into two row-runs for a column or two (the same
+    ambiguity `trace_line_curve` resolves via continuity), leaving a
+    stray 1-2px fragment in `remainder` that has nothing to do with
+    censoring. On this fixture, genuine "+" marks contribute ~24-25 real
+    pixels versus ~2 for riser anti-aliasing noise, so a small pixel-count
+    floor (well below a real mark, comfortably above noise) filters these
+    out without needing exact tuning.
+    """
+    curve_mask = np.zeros_like(mask)
+    last_row: int | None = None
+    for col in range(mask.shape[1]):
+        rows = np.where(mask[:, col] > 0)[0]
+        if len(rows) == 0:
+            continue
+        runs = _cluster_row_runs(rows)
+        if len(runs) > 1:
+            if last_row is None:
+                run = max(runs, key=len)
+            else:
+                run = min(runs, key=lambda r: min(abs(int(r.min()) - last_row), abs(int(r.max()) - last_row)))
+        else:
+            run = runs[0]
+        curve_mask[run.min():run.max() + 1, col] = 255
+        last_row = int(run.mean())
+
+    remainder = cv2.bitwise_and(mask, cv2.bitwise_not(curve_mask))
+    if not np.any(remainder):
+        return []
+
+    kernel = np.ones((7, 7), np.uint8)
+    merged = cv2.dilate(remainder, kernel, iterations=1)
+    contours, _ = cv2.findContours(merged, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+    marks = []
+    for contour in contours:
+        x, y, cw, ch = cv2.boundingRect(contour)
+        area = cw * ch
+        if area < 6 or area > 400:
+            continue
+        aspect = cw / ch if ch else 0
+        if not (0.4 <= aspect <= 2.5):
+            continue  # skip long thin strips (legend swatches etc.)
+
+        # centroid from the original (undilated) remainder pixels so the
+        # dilation used for merging doesn't skew the reported position.
+        orig_rows, orig_cols = np.where(remainder[y:y + ch, x:x + cw] > 0)
+        if len(orig_rows) < 8:
+            continue  # too few real pixels to be a mark; likely riser anti-aliasing noise
+        center_x_px = box.left + x + orig_cols.mean()
+        center_y_px = box.top + y + orig_rows.mean()
+        marks.append(
+            (
+                x_calibration.pixel_to_value(center_x_px),
+                y_calibration.pixel_to_value(center_y_px),
+            )
+        )
+    return marks
+
+
 def extract_bar_heights(
     mask: np.ndarray, box: PlotBox, x_calibration: AxisCalibration, y_calibration: AxisCalibration
 ) -> list[tuple[float, float]]:
