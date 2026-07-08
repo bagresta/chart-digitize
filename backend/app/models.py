@@ -20,3 +20,12 @@ class UploadResponse(BaseModel):
     y_axis_calibrated_from_ocr: bool
     x_reference_points: list[tuple[float, float]]
     y_reference_points: list[tuple[float, float]]
+
+
+class SeriesInput(BaseModel):
+    name: str
+    points: list[tuple[float, float]]
+
+
+class ExportRequest(BaseModel):
+    series: list[SeriesInput]

@@ -52,3 +52,19 @@ def test_upload_with_session_returns_extracted_series():
     assert len(body["series"]) == 1
     assert len(body["series"][0]["points"]) > 5
     assert "overlay_image_base64" in body
+
+
+def test_export_csv_requires_session():
+    response = client.post("/api/export/csv", json={"series": []})
+    assert response.status_code == 401
+
+
+def test_export_csv_returns_file():
+    cookies = _login_client()
+    response = client.post(
+        "/api/export/csv",
+        json={"series": [{"name": "Series A", "points": [[1.0, 2.0]]}]},
+        cookies=dict(cookies),
+    )
+    assert response.status_code == 200
+    assert "series,x,y" in response.text

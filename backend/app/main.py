@@ -4,7 +4,8 @@ from fastapi import Cookie, FastAPI, HTTPException, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.auth import create_session_token, verify_password, verify_session_token
-from app.models import LoginRequest, SeriesResponse, UploadResponse
+from app.export import series_to_csv, series_to_excel
+from app.models import ExportRequest, LoginRequest, SeriesResponse, UploadResponse
 from app.pipeline.pipeline import run_pipeline
 
 app = FastAPI(title="Chart Digitizer API")
@@ -61,4 +62,26 @@ async def upload(file: UploadFile, session: str | None = Cookie(default=None)):
         y_axis_calibrated_from_ocr=result.y_axis_calibrated_from_ocr,
         x_reference_points=result.x_reference_points,
         y_reference_points=result.y_reference_points,
+    )
+
+
+@app.post("/api/export/csv")
+def export_csv(request: ExportRequest, session: str | None = Cookie(default=None)):
+    _require_session(session)
+    csv_text = series_to_csv([s.model_dump() for s in request.series])
+    return Response(
+        content=csv_text,
+        media_type="text/csv",
+        headers={"Content-Disposition": "attachment; filename=chart_data.csv"},
+    )
+
+
+@app.post("/api/export/excel")
+def export_excel(request: ExportRequest, session: str | None = Cookie(default=None)):
+    _require_session(session)
+    excel_bytes = series_to_excel([s.model_dump() for s in request.series])
+    return Response(
+        content=excel_bytes,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": "attachment; filename=chart_data.xlsx"},
     )
