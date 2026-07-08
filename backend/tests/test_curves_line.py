@@ -46,3 +46,16 @@ def test_trace_line_curve_step_mode_recovers_km_curve():
     # survival should be non-increasing across a KM curve
     y_values = [p[1] for p in points]
     assert all(y_values[i] >= y_values[i + 1] - 0.05 for i in range(len(y_values) - 1))
+
+    # Regression guard: a step curve with a handful of flat plateaus should
+    # produce roughly one point per plateau edge, not dozens. A prior bug in
+    # the riser/plateau de-duplication logic ping-ponged between a flat
+    # run's two boundary rows on every column of every plateau (since
+    # `last_row` always sits exactly on one edge of a repeated run), which
+    # inflated a curve that should trace to well under 20 points into
+    # hundreds. Bound the point count by the number of distinct traced
+    # y-levels (rounded to absorb anti-aliasing jitter of a pixel or two) —
+    # a handful of points per distinct level is expected (each plateau's
+    # two edges, plus a couple of riser points), but not dozens.
+    distinct_levels = {round(y, 2) for y in y_values}
+    assert len(points) <= len(distinct_levels) * 3

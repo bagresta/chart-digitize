@@ -60,19 +60,30 @@ def trace_line_curve(
        prior point to anchor to, so it falls back to the run with the most
        pixels, since a genuine line/step stroke is typically much thicker
        than a small swatch or tick mark.
-    2. Riser de-duplication (step mode only): a step's vertical jump is
-       drawn as a diagonal, anti-aliased edge that itself spans 2-3 pixel
-       columns, each contributing a run covering nearly the whole jump. If
-       every such column's full extent were emitted, the second and later
-       columns would restate ground the first one already covered and then
-       flip back toward it, appearing as a spurious increase. So each
-       column's run is clipped to only the direction beyond `last_row`
-       (its previous frontier) before emitting a point, and a run that
-       has `last_row` strictly inside it (i.e. contributes nothing new
-       beyond what's already been traced) is skipped entirely.
+    2. Riser/plateau de-duplication (step mode only): a step's vertical
+       jump is drawn as a diagonal, anti-aliased edge that itself spans 2-3
+       pixel columns, each contributing a run covering nearly the whole
+       jump; and a flat plateau repeats essentially the same run across
+       every column it spans. Either way, once a column's run has been
+       processed, later columns whose run is (within anti-aliasing noise)
+       the same span contribute nothing new and are skipped outright —
+       tracked via `last_run`, the previous column's full (top, bottom)
+       span, not just a single row. This is deliberately not a check
+       against `last_row` alone: on a flat plateau, the two boundary rows
+       (top and bottom) are the only values ever emitted, so `last_row`
+       always sits exactly on one edge of every later identical run, and a
+       same-vs-different-span comparison is needed to recognize "nothing
+       changed" instead of misreading the repeat as fresh movement (which
+       would otherwise ping-pong between the plateau's two edges forever).
+       When a column's run *does* differ from the previous one — a genuine
+       riser or a new plateau — only the endpoint that extends beyond
+       `last_row` (the previously traced frontier) is emitted, so a
+       multi-column riser doesn't restate ground already covered by an
+       earlier column in the same jump.
     """
     points_px: list[tuple[int, int]] = []
     last_row: int | None = None
+    last_run: tuple[int, int] | None = None
 
     for col in range(mask.shape[1]):
         rows = np.where(mask[:, col] > 0)[0]
@@ -91,35 +102,39 @@ def trace_line_curve(
         if step:
             # a step curve can have two y-levels in the same column at a
             # jump; record the extremes rather than averaging them away.
-            # A diagonal (anti-aliased) riser can itself span 2-3 adjacent
-            # pixel columns, each contributing a run that covers most of the
-            # jump's row range. Emitting both endpoints of every such column
-            # would restate ground already covered by a prior column and
-            # then immediately "reverse" back toward it, looking like a
-            # false direction change. So the run is clipped to only the
-            # portion beyond the last traced row (i.e. genuinely new ground)
-            # before its extremes are emitted; anything already covered by
-            # an earlier column in this same riser is skipped.
             top, bottom = int(run.min()), int(run.max())
-            if last_row is None:
+            if last_run is None:
                 points_px.append((col, top))
                 if bottom != top:
                     points_px.append((col, bottom))
                 last_row = bottom
-            elif top < last_row < bottom:
-                # last_row already falls strictly inside this run: this
-                # column's run is just the same riser we already traced
-                # continuing to show up (its anti-aliased edges shift by a
-                # pixel or two per column), not new movement. Nothing to add.
+                last_run = (top, bottom)
                 continue
-            elif last_row <= top:
+
+            prev_top, prev_bottom = last_run
+            if abs(top - prev_top) <= 2 and abs(bottom - prev_bottom) <= 2:
+                # same span as the previous data column (within
+                # anti-aliasing noise): a plateau continuing, or a riser
+                # column repeating — nothing new to emit either way.
+                last_run = (top, bottom)
+                continue
+
+            if last_row <= top:
                 # extending downward (row increasing) past what we've seen
                 points_px.append((col, bottom))
                 last_row = bottom
-            else:  # last_row >= bottom
+            elif last_row >= bottom:
                 # extending upward (row decreasing) past what we've seen
                 points_px.append((col, top))
                 last_row = top
+            else:
+                # last_row falls inside this differing run's span (e.g. a
+                # riser column widening mid-transition); advance to
+                # whichever extreme is farther as the new frontier.
+                new_last = bottom if (bottom - last_row) >= (last_row - top) else top
+                points_px.append((col, new_last))
+                last_row = new_last
+            last_run = (top, bottom)
         else:
             row = int(run.mean())
             points_px.append((col, row))
