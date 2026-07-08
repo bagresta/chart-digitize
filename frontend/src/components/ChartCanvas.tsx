@@ -37,14 +37,12 @@ export function ChartCanvas({
     return <p>Loading image...</p>;
   }
 
-  const xCalibration: Calibration = fitCalibration([
-    { pixel: xReferencePoints[0][0], value: xReferencePoints[0][1] },
-    { pixel: xReferencePoints[xReferencePoints.length - 1][0], value: xReferencePoints[xReferencePoints.length - 1][1] },
-  ]);
-  const yCalibration: Calibration = fitCalibration([
-    { pixel: yReferencePoints[0][0], value: yReferencePoints[0][1] },
-    { pixel: yReferencePoints[yReferencePoints.length - 1][0], value: yReferencePoints[yReferencePoints.length - 1][1] },
-  ]);
+  const xCalibration: Calibration = fitCalibration(
+    xReferencePoints.map(([pixel, value]) => ({ pixel, value })),
+  );
+  const yCalibration: Calibration = fitCalibration(
+    yReferencePoints.map(([pixel, value]) => ({ pixel, value })),
+  );
 
   return (
     <Stage width={image.width} height={image.height}>
