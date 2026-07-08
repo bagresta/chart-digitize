@@ -70,8 +70,9 @@ def _has_step_pattern(mask: np.ndarray) -> bool:
     foreground pixels within a single row) with short vertical risers —
     detected by counting rows that contain a long horizontal run. A
     per-column vertical-extent check was tried first but breaks down for
-    multi-series KM charts, since overlapping/crossing step curves merge
-    into one connected component whose per-column extent spans both curves,
+    multi-series KM charts, since step curves occupying overlapping y-ranges
+    in the same columns merge into one connected component whose per-column
+    extent spans both curves,
     masking the flat treads. Row-based horizontal-run detection is immune to
     that: a diagonal line (or scatter blobs) never produces a long
     horizontal run in any single row, no matter how many series overlap.
