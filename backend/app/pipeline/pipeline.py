@@ -74,8 +74,59 @@ def _build_axis_calibration(
     return calibration, True, reference_points
 
 
+# Same style of color-distance measure as isolate_series_mask in curves.py
+# (sum of absolute per-channel BGR differences), and a tolerance in the same
+# ballpark, so "two legend entries are really the same series" and "these
+# pixels belong to that series' mask" agree on what counts as the same
+# color. This is defense-in-depth: legend.py's column-alignment filter
+# should already stop same-colored false-positive swatches (e.g. individual
+# scatter markers) from ever becoming separate legend entries, but if one
+# ever slips through, this catches it before it triggers a second full
+# extraction pass over what is really the same series.
+_COLOR_DEDUP_TOLERANCE = 50
+
+
+def _color_distance(color_a: tuple[int, int, int], color_b: tuple[int, int, int]) -> int:
+    return sum(abs(a - b) for a, b in zip(color_a, color_b))
+
+
+def _dedupe_legend_entries_by_color(
+    named_colors: list[tuple[str, tuple[int, int, int]]],
+) -> list[tuple[str, tuple[int, int, int]]]:
+    """Collapses legend entries whose colors are close enough to plausibly
+    be the same series detected twice (e.g. a spurious legend entry that
+    sampled the same swatch color as a legitimate one). When two entries
+    collide, keeps the one with the more plausible-looking name — longer,
+    alphabetic text beats short/garbage OCR output like "ee" or "Sn" — and
+    otherwise keeps whichever was found first.
+    """
+    kept: list[tuple[str, tuple[int, int, int]]] = []
+    for name, color in named_colors:
+        collision_index = next(
+            (i for i, (_, kept_color) in enumerate(kept) if _color_distance(color, kept_color) <= _COLOR_DEDUP_TOLERANCE),
+            None,
+        )
+        if collision_index is None:
+            kept.append((name, color))
+            continue
+
+        existing_name, existing_color = kept[collision_index]
+        if _is_more_plausible_name(name, existing_name):
+            kept[collision_index] = (name, color)
+    return kept
+
+
+def _is_more_plausible_name(candidate: str, existing: str) -> bool:
+    candidate_alpha = sum(1 for c in candidate if c.isalpha())
+    existing_alpha = sum(1 for c in existing if c.isalpha())
+    if candidate_alpha != existing_alpha:
+        return candidate_alpha > existing_alpha
+    return len(candidate) > len(existing)
+
+
 def _find_series_color_for_legend(legend_entries: list[LegendEntry]) -> list[tuple[str, tuple[int, int, int]]]:
-    return [(entry.name, entry.color_bgr) for entry in legend_entries]
+    named_colors = [(entry.name, entry.color_bgr) for entry in legend_entries]
+    return _dedupe_legend_entries_by_color(named_colors)
 
 
 def _dominant_series_color(image: np.ndarray, box: PlotBox) -> tuple[int, int, int]:

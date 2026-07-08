@@ -1,8 +1,8 @@
 import cv2
 import pytest
 
-from app.pipeline.pipeline import run_pipeline
-from tests.fixtures import make_km_chart, make_line_chart
+from app.pipeline.pipeline import _dedupe_legend_entries_by_color, run_pipeline
+from tests.fixtures import make_km_chart, make_line_chart, make_scatter_chart
 
 
 def _encode(image):
@@ -46,3 +46,47 @@ def test_run_pipeline_with_manual_axis_override_skips_ocr_calibration():
 
     assert len(result.series) == 1
     assert len(result.series[0].points) > 5
+
+
+def test_run_pipeline_on_scatter_chart_produces_single_series():
+    """Regression test for the confirmed Task 13 bug: detect_legend_entries
+    used to produce two spurious legend entries (both sampling the same
+    purple marker color, named after garbage OCR text) on charts with no
+    real legend at all, splitting one true series into two fake ones. Now
+    that legend.py rejects unaligned swatch candidates, the dominant-color
+    fallback should kick in and yield exactly one series."""
+    image, truth = make_scatter_chart()
+    result = run_pipeline(_encode(image))
+
+    assert result.chart_type == "scatter"
+    assert len(result.series) == 1
+    assert len(result.series[0].points) > 5
+
+
+def test_dedupe_legend_entries_by_color_merges_near_identical_colors():
+    # Two entries with a color distance of 20 (well within the dedup
+    # tolerance) should collapse to one, keeping the more plausible name.
+    named_colors = [
+        ("ee", (128, 0, 128)),
+        ("Sn", (130, 0, 135)),
+    ]
+    result = _dedupe_legend_entries_by_color(named_colors)
+    assert result == [("ee", (128, 0, 128))]
+
+
+def test_dedupe_legend_entries_by_color_prefers_more_plausible_name():
+    named_colors = [
+        ("Sn", (128, 0, 128)),
+        ("Series A", (130, 0, 132)),
+    ]
+    result = _dedupe_legend_entries_by_color(named_colors)
+    assert result == [("Series A", (130, 0, 132))]
+
+
+def test_dedupe_legend_entries_by_color_keeps_genuinely_different_colors():
+    named_colors = [
+        ("Arm A", (0, 0, 255)),  # red
+        ("Arm B", (0, 128, 0)),  # green
+    ]
+    result = _dedupe_legend_entries_by_color(named_colors)
+    assert result == named_colors
