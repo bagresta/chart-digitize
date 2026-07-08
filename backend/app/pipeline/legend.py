@@ -25,12 +25,19 @@ _TEXT_UPSCALE_FACTOR = 10
 # legend placements. Individual scatter/line data markers, by contrast, are
 # scattered across the whole plot width and only ever land within a few
 # pixels of each other by pure chance. On this project's own scatter-chart
-# fixture (15 random points), the closest two unrelated markers land 12px
-# apart — so the column-alignment tolerance must stay comfortably below
-# that to avoid mistaking marker noise for an aligned legend column, while
-# still leaving a little slack for sub-pixel/anti-aliasing rounding in the
-# swatch centroid. 5px satisfies both.
-_SWATCH_COLUMN_X_TOLERANCE = 5
+# fixture (15 random points), the closest two unrelated markers land 9px
+# apart (confirmed by brute-force testing tolerances 0-15px against this
+# fixture) — so the column-alignment tolerance must stay below that to
+# avoid mistaking marker noise for an aligned legend column. 8px keeps a
+# safe margin under the 9px false-grouping threshold on this fixture while
+# giving more slack than a tighter value for real-world (non-synthetic,
+# JPEG/screenshot) chart images, where swatch-centroid detection may drift
+# further than on a clean vector-rendered matplotlib PNG. Note: this
+# heuristic is tuned against synthetic fixtures only — legend alignment
+# drift on real published figures (scanned/photographed, or rendered by
+# tools other than matplotlib) hasn't been validated and may need
+# retuning once tested against real chart images.
+_SWATCH_COLUMN_X_TOLERANCE = 8
 
 
 @dataclass
