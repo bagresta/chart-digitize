@@ -68,3 +68,19 @@ def test_export_csv_returns_file():
     )
     assert response.status_code == 200
     assert "series,x,y" in response.text
+
+
+def test_export_excel_requires_session():
+    response = client.post("/api/export/excel", json={"series": []})
+    assert response.status_code == 401
+
+
+def test_export_excel_returns_file():
+    cookies = _login_client()
+    response = client.post(
+        "/api/export/excel",
+        json={"series": [{"name": "Series A", "points": [[1.0, 2.0]]}]},
+        cookies=dict(cookies),
+    )
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
