@@ -19,6 +19,18 @@ _SWATCH_ASPECT_RANGE = (0.1, 15.0)
 _TEXT_CROP_VPAD = 10
 _TEXT_CROP_WIDTH = 150
 _TEXT_UPSCALE_FACTOR = 10
+# Real matplotlib legends draw every swatch's handle patch flush against the
+# same left edge, so genuine swatches land at (empirically) *exactly* the
+# same x pixel — verified at 0px drift across upper-right/lower-left/center
+# legend placements. Individual scatter/line data markers, by contrast, are
+# scattered across the whole plot width and only ever land within a few
+# pixels of each other by pure chance. On this project's own scatter-chart
+# fixture (15 random points), the closest two unrelated markers land 12px
+# apart — so the column-alignment tolerance must stay comfortably below
+# that to avoid mistaking marker noise for an aligned legend column, while
+# still leaving a little slack for sub-pixel/anti-aliasing rounding in the
+# swatch centroid. 5px satisfies both.
+_SWATCH_COLUMN_X_TOLERANCE = 5
 
 
 @dataclass
@@ -31,6 +43,47 @@ class LegendEntry:
 def _is_near_grayscale(color_bgr: tuple[int, int, int], tolerance: int = 12) -> bool:
     b, g, r = color_bgr
     return max(b, g, r) - min(b, g, r) < tolerance
+
+
+def _filter_to_largest_aligned_column(entries: list["LegendEntry"]) -> list["LegendEntry"]:
+    """Rejects swatch candidates that don't form a coherent legend column.
+
+    Real legends draw every swatch's handle patch at the same x position
+    (a left-aligned, vertically-stacked column); individual scatter/line
+    data markers are scattered across the plot area and essentially never
+    align in x together. Group candidates by x-position (small tolerance,
+    to allow for anti-aliasing/rounding noise) and keep only the largest
+    group.
+
+    A single, ungrouped candidate is a weak signal on its own — it's
+    consistent with either a genuine single-entry legend or a lone
+    false-positive swatch-like blob (e.g. a scatter marker) — so this
+    deliberately biases toward NOT inventing a legend that isn't clearly
+    there: only groups of 2+ aligned candidates are accepted as a legend.
+    Ties for largest group size are also rejected for the same reason —
+    multiple equally-sized, mutually-misaligned columns aren't a coherent
+    single legend.
+    """
+    if not entries:
+        return []
+
+    groups: list[list["LegendEntry"]] = []
+    for entry in sorted(entries, key=lambda e: e.swatch_position[0]):
+        x = entry.swatch_position[0]
+        if groups and x - groups[-1][-1].swatch_position[0] <= _SWATCH_COLUMN_X_TOLERANCE:
+            groups[-1].append(entry)
+        else:
+            groups.append([entry])
+
+    largest_size = max(len(g) for g in groups)
+    if largest_size < 2:
+        return []  # no group of 2+ aligned candidates — no coherent legend column
+
+    largest_groups = [g for g in groups if len(g) == largest_size]
+    if len(largest_groups) != 1:
+        return []  # tie between multiple equally-sized, misaligned columns — ambiguous
+
+    return largest_groups[0]
 
 
 def detect_legend_entries(image: np.ndarray, box: PlotBox) -> list[LegendEntry]:
@@ -91,4 +144,4 @@ def detect_legend_entries(image: np.ndarray, box: PlotBox) -> list[LegendEntry]:
             )
         )
 
-    return entries
+    return _filter_to_largest_aligned_column(entries)
